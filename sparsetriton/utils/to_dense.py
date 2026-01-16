@@ -15,13 +15,10 @@ __all__ = ["to_dense"]
 @triton.jit
 def _to_dense_fwd_kernel(
     feats_ptr,
-    coords_ptr,
+    coords_ptr, # (N, D)
     out_ptr,
-    strides_ptr,
-    stride_feats_n,
-    stride_feats_c,
-    stride_coords_n,
-    stride_coords_d,
+    strides_ptr, # (3)
+    batch_size,
     N,
     C,
     BLOCK_N: tl.constexpr,
@@ -36,22 +33,24 @@ def _to_dense_fwd_kernel(
 
     mask_n = offs_n < N
     mask_c = offs_c < C
-
-    curr_offset = tl.zeros([BLOCK_N], dtype=tl.int64)
-
+    out_off_n = tl.zeros((BLOCK_N,), dtype=tl.int64)
+    # Load features
     for d in range(D):
-        coords_d_ptr = coords_ptr + offs_n * stride_coords_n + d * stride_coords_d
-        coord_val = tl.load(coords_d_ptr, mask=mask_n, other=0)
-        stride_val = tl.load(strides_ptr + d)
-        curr_offset += coord_val.to(tl.int64) * stride_val
+        stride = tl.load(strides_ptr + d)
+        coords_d = tl.load(coords_ptr + offs_n * D + d, mask=mask_n, other=0).to(tl.int64)
+        out_off_n += coords_d * stride
 
-    feats_ptrs = (
-        feats_ptr + offs_n[:, None] * stride_feats_n + offs_c[None, :] * stride_feats_c
+    feat_vals = tl.load(
+        feats_ptr + offs_n[:, None] * C + offs_c[None, :],
+        mask=mask_n[:, None] & mask_c[None, :],
+        other=0.0,
+    ) # (BLOCK_N, BLOCK_C)
+    # Store to output
+    tl.store(
+        out_ptr + out_off_n[:, None] * C + offs_c[None, :],
+        feat_vals,
+        mask=mask_n[:, None] & mask_c[None, :],
     )
-    feat_vals = tl.load(feats_ptrs, mask=mask_n[:, None] & mask_c[None, :], other=0.0)
-
-    out_ptrs = out_ptr + curr_offset[:, None] + offs_c[None, :]
-    tl.store(out_ptrs, feat_vals, mask=mask_n[:, None] & mask_c[None, :])
 
 
 @triton.jit
@@ -60,10 +59,6 @@ def _to_dense_bwd_kernel(
     coords_ptr,
     grad_feats_ptr,
     strides_ptr,
-    stride_coords_n,
-    stride_coords_d,
-    stride_grad_feats_n,
-    stride_grad_feats_c,
     N,
     C,
     BLOCK_N: tl.constexpr,
@@ -79,25 +74,26 @@ def _to_dense_bwd_kernel(
     mask_n = offs_n < N
     mask_c = offs_c < C
 
-    curr_offset = tl.zeros([BLOCK_N], dtype=tl.int64)
-
+    # Calculate output offset
+    out_off_n = tl.zeros((BLOCK_N,), dtype=tl.int64)
     for d in range(D):
-        coords_d_ptr = coords_ptr + offs_n * stride_coords_n + d * stride_coords_d
-        coord_val = tl.load(coords_d_ptr, mask=mask_n, other=0)
+        coord_val = tl.load(coords_ptr + offs_n * D + d, mask=mask_n, other=0).to(tl.int64)
         stride_val = tl.load(strides_ptr + d)
-        curr_offset += coord_val.to(tl.int64) * stride_val
+        out_off_n += coord_val * stride_val
 
-    grad_out_ptrs = grad_out_ptr + curr_offset[:, None] + offs_c[None, :]
+    # Load grad_out
     grad_vals = tl.load(
-        grad_out_ptrs, mask=mask_n[:, None] & mask_c[None, :], other=0.0
+        grad_out_ptr + out_off_n[:, None] * C + offs_c[None, :],
+        mask=mask_n[:, None] & mask_c[None, :],
+        other=0.0,
     )
 
-    grad_feats_ptrs = (
-        grad_feats_ptr
-        + offs_n[:, None] * stride_grad_feats_n
-        + offs_c[None, :] * stride_grad_feats_c
+    # Store grad_feats
+    tl.store(
+        grad_feats_ptr + offs_n[:, None] * C + offs_c[None, :],
+        grad_vals,
+        mask=mask_n[:, None] & mask_c[None, :],
     )
-    tl.store(grad_feats_ptrs, grad_vals, mask=mask_n[:, None] & mask_c[None, :])
 
 
 class ToDenseFunction(Function):
@@ -108,73 +104,65 @@ class ToDenseFunction(Function):
         feats: torch.Tensor,
         coords: torch.Tensor,
         spatial_range: Tuple[int],
+        batch_size: int,
     ) -> torch.Tensor:
         feats = feats.contiguous()
         coords = coords.contiguous().to(get_coords_dtype())
-        outputs = torch.zeros(
-            spatial_range + (feats.size(1),), dtype=feats.dtype, device=feats.device
+        
+        output_shape = (batch_size,) + spatial_range + (feats.size(1),)
+        outputs = torch.empty(
+            output_shape, dtype=feats.dtype, device=feats.device
         )
 
         N, C = feats.shape
-        D = len(spatial_range)
-        spatial_strides = torch.tensor(
-            outputs.stride()[:-1], dtype=torch.int64, device=feats.device
-        )
+        D = coords.shape[1]
+        
+        spatial_strides = torch.empty((D,), dtype=torch.int64, device=feats.device)
+        spatial_strides[-1] = 1
+        for d in range(0, D - 1):
+            spatial_strides[-d - 2] = spatial_strides[-d - 1] * spatial_range[-d - 1]
+
+        ctx.save_for_backward(coords, spatial_strides)
+        ctx.N = N
+        ctx.C = C
+        ctx.D = D
 
         grid = lambda meta: (
             triton.cdiv(N, meta["BLOCK_N"]),
             triton.cdiv(C, meta["BLOCK_C"]),
         )
+
         _to_dense_fwd_kernel[grid](
             feats,
             coords,
             outputs,
             spatial_strides,
-            feats.stride(0),
-            feats.stride(1),
-            coords.stride(0),
-            coords.stride(1),
+            batch_size,
             N,
             C,
             BLOCK_N=128,
             BLOCK_C=64,
             D=D,
         )
-
-        ctx.for_backwards = (coords, spatial_range)
-        return outputs.to(feats.dtype)
+        return outputs
 
     @staticmethod
-    # @custom_bwd
     def backward(ctx, grad_output: torch.Tensor):
-        coords, spatial_range = ctx.for_backwards
-        grad_output = grad_output.contiguous()
-        grad_feats = torch.zeros(
-            coords.size(0),
-            grad_output.size(-1),
-            dtype=grad_output.dtype,
-            device=grad_output.device,
-        )
+        coords, spatial_strides = ctx.saved_tensors
+        N, C, D = ctx.N, ctx.C, ctx.D
 
-        N, C = grad_feats.shape
-        D = len(spatial_range)
-        spatial_strides = torch.tensor(
-            grad_output.stride()[:-1], dtype=torch.int64, device=grad_output.device
-        )
+        grad_feats = torch.zeros((N, C), dtype=grad_output.dtype, device=grad_output.device)
 
         grid = lambda meta: (
             triton.cdiv(N, meta["BLOCK_N"]),
             triton.cdiv(C, meta["BLOCK_C"]),
         )
+
         _to_dense_bwd_kernel[grid](
             grad_output,
             coords,
             grad_feats,
             spatial_strides,
-            coords.stride(0),
-            coords.stride(1),
-            grad_feats.stride(0),
-            grad_feats.stride(1),
             N,
             C,
             BLOCK_N=128,
@@ -182,10 +170,14 @@ class ToDenseFunction(Function):
             D=D,
         )
 
-        return grad_feats, None, None
+        return grad_feats, None, None, None
 
 
 def to_dense(
     feats: torch.Tensor, coords: torch.Tensor, spatial_range: Tuple[int]
 ) -> torch.Tensor:
-    return ToDenseFunction.apply(feats, coords, spatial_range)
+    if coords.shape[0] == 0:
+        batch_size = 1
+    else:
+        batch_size = int(coords[:, 0].max().item()) + 1
+    return ToDenseFunction.apply(feats, coords, spatial_range, batch_size)

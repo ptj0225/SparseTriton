@@ -1,7 +1,10 @@
 import torch
 import triton
 import triton.language as tl
+from sparsetriton.utils.hash import hash_coords_kernel, flatten_coords_kernel, HashTable
+from typing import *
 
+__all__ = ["get_neighbor_map", "build_kmap"]
 
 
 @triton.jit
@@ -23,72 +26,76 @@ def get_neighbor_map_kernel(
     y = tl.load(coords_ptr + idx * 4 + 2, mask=mask)
     z = tl.load(coords_ptr + idx * 4 + 3, mask=mask)
 
-    # Iterate over 3x3x3 kernel
     for dk in range(kernel_size ** 3):
         dx = (dk // kernel_size**2) - kernel_size // 2
         dy = ((dk // kernel_size) % kernel_size) - kernel_size // 2
         dz = (dk % kernel_size) - kernel_size // 2
 
         nx, ny, nz = x + dx, y + dy, z + dz
-        n_key = (b.to(tl.int64) << 30) | (nx.to(tl.int64) << 20) | (ny.to(tl.int64) << 10) | nz.to(tl.int64)
-        n_hash = _hash_coords(b, nx, ny, nz) % table_size
-
+        n_hash = hash_coords_kernel(b, nx, ny, nz) % table_size
+        n_key = flatten_coords_kernel(b, nx, ny, nz)
         # Probe hash table
         found_idx = -1
-        for i in range(32): # Max probing steps
-            curr_hash = (n_hash + i) % table_size
-            k = tl.load(hash_keys_ptr + curr_hash)
-            if k == n_key:
-                found_idx = tl.load(hash_vals_ptr + curr_hash)
-                break
-            if k == -1: break
+        active_mask = mask
+        probe_step = 0
+        while (tl.max(active_mask.to(tl.int32), axis=0) > 0 & (probe_step < 32)):
+            curr_hash = (n_hash + probe_step) % table_size
+            k = tl.load(hash_keys_ptr + curr_hash, mask=active_mask)
+            v = tl.load(hash_vals_ptr + curr_hash, mask=active_mask)
+            active_mask = active_mask & (k == n_key)
+            tl.store(neighbor_map_ptr + idx * kernel_size**3 + dk, v, mask=active_mask)
+            probe_step += 1
 
-        tl.store(neighbor_map_ptr + idx * kernel_size**3 + dk, found_idx, mask=mask)
+
+def get_neighbor_map(coords: torch.Tensor, hash_table: HashTable, kernel_size: int) -> torch.Tensor:
+    """
+    Generates a neighbor map for sparse convolution.
+    
+    Args:
+        coords: (N, 4) coordinates tensor (Batch, X, Y, Z)
+        hash_table: HashTable object containing the sparse tensor coordinates
+        kernel_size: Size of the convolution kernel (assumed cubic)
+        
+    Returns:
+        neighbor_map: (N, kernel_volume) tensor containing indices of neighbors. 
+                      -1 indicates no neighbor.
+    """
+    N = coords.shape[0]
+    kernel_vol = kernel_size ** 3
+    neighbor_map = torch.full((N, kernel_vol), -1, dtype=torch.int64, device=coords.device)
+    
+    grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']),)
+    
+    get_neighbor_map_kernel[grid](
+        coords, 
+        hash_table.table_keys, 
+        hash_table.table_values, 
+        neighbor_map,
+        N, 
+        hash_table.capacity,
+        kernel_size=kernel_size,
+        BLOCK_SIZE=128
+    )
+    return neighbor_map
 
 
-@triton.jit
-def build_kmap_kernel(
-    coords_ptr,
-    kmap_ptr,
-    table_keys_ptr,
-    table_values_ptr,
-    table_size,
-    N,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    idx = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = idx < N
-
-    b = tl.load(coords_ptr + idx * 4 + 0, mask=mask)
-    x = tl.load(coords_ptr + idx * 4 + 1, mask=mask)
-    y = tl.load(coords_ptr + idx * 4 + 2, mask=mask)
-    z = tl.load(coords_ptr + idx * 4 + 3, mask=mask)
-
-    hash = _hash_coords(
-        b, x, y, z
-    ) % table_size
-
-    probe_step = 0
-    active_mask = mask
-    key = _flatten_coords(b, x, y, z)
-    dummy_ptr = tl.nullptr(tl.int64)
-
-    while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < 32):
-        curr_hash = (hash + probe_step) % table_size
-        # tl.atomic_cas는 마스크를 직접 지원하지 않으므로 
-        target_ptr = tl.where(active_mask, table_keys_ptr + curr_hash, dummy_ptr)
-        old_key = tl.atomic_cas(target_ptr, tl.full((BLOCK_SIZE,), -1, dtype=tl.int64), key)
-
-        # 삽입 성공 조건: 빈 자리(-1)였거나, 이미 내 키가 들어있거나
-        success = (old_key == -1) | (old_key == key)
-
-        # 이번 루프에서 성공했고, 아직 처리 중이었던 스레드만 store
-        write_mask = active_mask & success
-        tl.store(table_keys_ptr + curr_hash, key, mask=write_mask)
-        tl.store(table_values_ptr + curr_hash, idx, mask=write_mask)
-        tl.store(kmap_ptr + idx, curr_hash, mask=write_mask)
-
-        active_mask = active_mask & (~success)
-        probe_step += 1
+def build_out_in_map(
+    in_coords: torch.Tensor,
+    kernel_size: int,
+    dilation: int = 1,
+    padding: int = 0,
+    spatial_shape: Tuple[int, int, int] = None,
+    submanifold: bool = True
+) -> torch.Tensor:
+    """
+    Builds input-output coordinate mapping for sparse convolution.
+    
+    Args:
+        in_coords: (N, 4) input coordinates tensor (Batch, X, Y, Z)
+        kernel_size: Size of the convolution kernel (assumed cubic)
+        dilation: Dilation rate for the convolution
+        padding: Padding size for the convolution
+        spatial_shape: Spatial shape of the input tensor (D, H, W)
+    """
+    if submanifold:
+        return in_coords
