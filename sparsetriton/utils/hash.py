@@ -116,7 +116,11 @@ def query_hash_table_kernel(
 
 @triton.jit
 def coalesce_coords_kernel(
-    coords_ptr, valids_ptr, BLOCK_SIZE: tl.constexpr, N: tl.constexpr
+    coords_ptr,
+    valids_ptr,
+    table_keys_ptr,
+    table_values_ptr,
+    BLOCK_SIZE: tl.constexpr, N: tl.constexpr, table_size: tl.constexpr
 ):
     pid = tl.program_id(0)
     idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -127,13 +131,14 @@ def coalesce_coords_kernel(
     z = tl.load(coords_ptr + idx * 4 + 3, mask=mask)
 
     key = flatten_coords_kernel(b, x, y, z)
-    hash_val = hash_coords_kernel(b, x, y, z) % (N * 2)
-    recorded = tl.zeros(((N * 2),), dtype=tl.int32)
+    hash_val = hash_coords_kernel(b, x, y, z) % table_size
     step = 0
     active_mask = mask
+    dummy_ptr = table_keys_ptr + table_size
     while tl.max(active_mask.to(tl.int32), axis=0) > 0 & (step < 256):
-        curr_hash = (hash_val + step) % (N * 2)
-        recorded = tl.atomic_cas(recorded + curr_hash, 0, mask=active_mask)
+        curr_hash = (hash_val + step) % table_size
+        target_ptr = tl.where(active_mask, table_keys_ptr + curr_hash, dummy_ptr)
+        recorded = tl.atomic_cas(target_ptr , tl.full((BLOCK_SIZE), -1), mask=active_mask)
         step += 1
         
     asjfkljasklfjklwajsflkasjflk
