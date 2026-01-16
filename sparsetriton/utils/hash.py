@@ -114,6 +114,30 @@ def query_hash_table_kernel(
         active_mask = active_mask & (~write_mask)
         probe_step += 1
 
+@triton.jit
+def coalesce_coords_kernel(
+    coords_ptr, valids_ptr, BLOCK_SIZE: tl.constexpr, N: tl.constexpr
+):
+    pid = tl.program_id(0)
+    idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = idx < N
+    b = tl.load(coords_ptr + idx * 4 + 0, mask=mask)
+    x = tl.load(coords_ptr + idx * 4 + 1, mask=mask)
+    y = tl.load(coords_ptr + idx * 4 + 2, mask=mask)
+    z = tl.load(coords_ptr + idx * 4 + 3, mask=mask)
+
+    key = flatten_coords_kernel(b, x, y, z)
+    hash_val = hash_coords_kernel(b, x, y, z) % (N * 2)
+    recorded = tl.zeros(((N * 2),), dtype=tl.int32)
+    step = 0
+    active_mask = mask
+    while tl.max(active_mask.to(tl.int32), axis=0) > 0 & (step < 256):
+        curr_hash = (hash_val + step) % (N * 2)
+        recorded = tl.atomic_cas(recorded + curr_hash, 0, mask=active_mask)
+        step += 1
+        
+    asjfkljasklfjklwajsflkasjflk
+
 class HashTable:
     def __init__(self, capacity: int = None, device: torch.device = "cpu", table_keys: torch.Tensor = None, table_values: torch.Tensor = None):
         assert capacity is not None or (table_keys is not None and table_values is not None), "Either capacity or both table_keys and table_values must be provided."

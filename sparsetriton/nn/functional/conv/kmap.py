@@ -11,7 +11,7 @@ __all__ = ["get_neighbor_map", "build_kmap"]
 def get_neighbor_map_kernel(
     coords_ptr, hash_keys_ptr, hash_vals_ptr, neighbor_map_ptr,
     N, table_size, 
-    kernel_size: tl.constexpr,
+    kernel_size: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr
 ):
     """

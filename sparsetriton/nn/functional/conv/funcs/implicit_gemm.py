@@ -69,7 +69,6 @@ def implicit_gemm_bwd_feat_kernel(
     acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_C_IN), dtype=tl.float32)
 
     for k in range(K_VOL):
-        # Forward에서 썼던 k의 대응되는 인덱스 로드
         n_idx = tl.load(in_out_map + off_n * K_VOL + k, mask=mask_n, other=-1)
         valid_mask = (n_idx >= 0) & mask_n
 
@@ -77,26 +76,18 @@ def implicit_gemm_bwd_feat_kernel(
             off_cout = c_out_off + tl.arange(0, BLOCK_SIZE_C_OUT)
             mask_cout = off_cout < C_out
 
-            # d_out 로드: (N, C_out)
             do_tile = tl.load(
                 d_out_ptr + off_n[:, None] * C_out + off_cout[None, :],
                 mask=mask_n[:, None] & mask_cout[None, :],
                 other=0.0
             )
 
-            # Weight 로드 및 Transpose 효과: (C_in, C_out) -> (C_out, C_in)를 dot에서 처리
-            # Weight shape: (K_VOL, C_in, C_out)
             w_tile = tl.load(
                 weights_ptr + (k * C_in * C_out) + (off_cin[None, :] + off_cout[:, None] * C_in),
                 mask=mask_cin[None, :] & mask_cout[:, None],
                 other=0.0
             )
-
-            # d_out (N, Cout) @ W.T (Cout, Cin) = d_feat (N, Cin)
             acc += tl.dot(do_tile, w_tile)
-
-    # d_features는 중복 업데이트가 발생할 수 있으므로 상황에 따라 atomic_add 필요 
-    # (단, Subm에선 n_idx가 고유하므로 일반 store 가능)
     tl.store(d_features_ptr + off_n[:, None] * C_in + off_cin[None, :], 
              acc.to(d_features_ptr.dtype.element_ty), 
              mask=mask_n[:, None] & mask_cin[None, :])
