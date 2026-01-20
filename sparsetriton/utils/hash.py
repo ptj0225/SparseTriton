@@ -55,15 +55,14 @@ def build_hash_table_kernel(
 
     active_mask = mask 
 
-    dummy_ptr = hash_keys_ptr + table_size
     probe_step = 0
     while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < 256):
         # 활성화된 스레드만 해시 계산 및 atomic 연산 수행
         curr_hash = (hash_val + probe_step) % table_size
         
         # tl.atomic_cas는 마스크를 직접 지원하지 않으므로 
-        target_ptr = tl.where(active_mask, hash_keys_ptr + curr_hash, dummy_ptr)
-        old_key = tl.atomic_cas(target_ptr, tl.full((BLOCK_SIZE,), -1, dtype=tl.int64), key)
+        compare_vals = tl.where(active_mask, -1, -2).to(tl.int64)
+        old_key = tl.atomic_cas(hash_keys_ptr + curr_hash, compare_vals, key)
         
         # 삽입 성공 조건: 빈 자리(-1)였거나, 이미 내 키가 들어있거나
         success = (old_key == -1) | (old_key == key)
@@ -116,11 +115,12 @@ def query_hash_table_kernel(
 
 @triton.jit
 def coalesce_coords_kernel(
-    coords_ptr,
-    valids_ptr,
-    table_keys_ptr,
-    table_values_ptr,
-    BLOCK_SIZE: tl.constexpr, N: tl.constexpr, table_size: tl.constexpr
+    coords_ptr, # (N, 4)
+    valids_ptr, # (N)
+    hash_keys_ptr, # (2 * N)
+    table_size, 
+    N: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr
 ):
     pid = tl.program_id(0)
     idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -130,18 +130,39 @@ def coalesce_coords_kernel(
     y = tl.load(coords_ptr + idx * 4 + 2, mask=mask)
     z = tl.load(coords_ptr + idx * 4 + 3, mask=mask)
 
-    key = flatten_coords_kernel(b, x, y, z)
-    hash_val = hash_coords_kernel(b, x, y, z) % table_size
+    hash_vals = hash_coords_kernel(b, x, y, z) % table_size
+    hash_keys = flatten_coords_kernel(b, x, y, z)
     step = 0
     active_mask = mask
-    dummy_ptr = table_keys_ptr + table_size
-    while tl.max(active_mask.to(tl.int32), axis=0) > 0 & (step < 256):
-        curr_hash = (hash_val + step) % table_size
-        target_ptr = tl.where(active_mask, table_keys_ptr + curr_hash, dummy_ptr)
-        recorded = tl.atomic_cas(target_ptr , tl.full((BLOCK_SIZE), -1), mask=active_mask)
+    duplicated = mask
+    while (tl.max(active_mask.to(tl.int32), axis=0) > 0) and (step < 128):
+        curr_hashs = (hash_vals + step) % table_size
+        compare_val = tl.where(active_mask, -1, -2).to(tl.int64)
+        old_keys = tl.atomic_cas(hash_keys_ptr + curr_hashs, compare_val, hash_keys)
+        duplicated = duplicated | ((old_keys == hash_keys) & active_mask)
+        success = (old_keys == -1) |  (old_keys == hash_keys)
+        active_mask = active_mask & (~success)
         step += 1
+
+    tl.store(valids_ptr + idx, False, mask=duplicated)
         
-    asjfkljasklfjklwajsflkasjflk
+def coalesce_coords(coords: torch.Tensor):
+    coords = coords.contiguous()
+    N = coords.shape[0]
+    BLOCK_SIZE = 128
+    meta = (triton.cdiv(N, BLOCK_SIZE),)
+    valids = torch.full((N,), True, device=coords.device, dtype=torch.bool)
+    hash_keys = torch.full((N * 4,), -1, device=coords.device, dtype=torch.int64)
+    table_size = hash_keys.shape[0]
+    coalesce_coords_kernel[meta](
+        coords,
+        valids,
+        hash_keys,
+        table_size,
+        N,
+        BLOCK_SIZE
+    )
+    return valids
 
 class HashTable:
     def __init__(self, capacity: int = None, device: torch.device = "cpu", table_keys: torch.Tensor = None, table_values: torch.Tensor = None):
