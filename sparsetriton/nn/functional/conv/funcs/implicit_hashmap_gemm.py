@@ -149,6 +149,7 @@ def implicit_gemm_bwd_weight_kernel(
     # d_weights shape: (K, C_in, C_out)
     w_offset = (pid_k * C_in * C_out) + (off_cin[:, None] * C_out + off_cout[None, :])
     tl.store(d_weights_ptr + w_offset, acc.to(d_weights_ptr.dtype.element_ty), mask=mask_cin[:, None] & mask_cout[None, :])
+    
 class SparseConvImplicitGEMM(torch.autograd.Function):
     @staticmethod
     def forward(ctx, features, weights, in_out_map, output_size):

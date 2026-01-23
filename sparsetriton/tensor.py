@@ -1,11 +1,19 @@
-from numpy import size
 import torch
 from typing import *
 
 from sparsetriton.config import get_coords_dtype
 from sparsetriton.utils.to_dense import to_dense
+from sparsetriton.utils.hash import HashTable
 
 __all__ = ["SparseTensor"]
+
+    
+class TensorCache:
+    def __init__(
+        self,
+    ) -> None:
+        self.kmaps: Dict[Tuple[Any, ...], Any] = {}
+        self.hashtable: Optional[HashTable] = None
 
 
 class SparseTensor:
@@ -15,21 +23,22 @@ class SparseTensor:
         coords: torch.Tensor,
         spatial_shape: Tuple[int, ...] = None,
         batch_size: int = None,
+        cache: TensorCache = None
     ) -> None:
         self.feats = feats
-        self.coords = coords.to(get_coords_dtype())
+        self.coords = coords.to(device=feats.device, dtype=get_coords_dtype())
         if spatial_shape is None:
-            self.spatial_shape = torch.Size(coords[:, 1:].max(dim=0).values + 1)
+            self.spatial_shape = torch.Size(self.coords[:, 1:].max(dim=0).values + 1) if self.coords.shape[0] > 0 else torch.Size([0, 0, 0])
         else:
             self.spatial_shape = torch.Size(spatial_shape)
         
         if batch_size is None:
-            self.batch_size = int(coords[:, 0].max().item() + 1)
+            self.batch_size = int(self.coords[:, 0].max().item() + 1) if self.coords.shape[0] > 0 else 0
         else:
-            assert batch_size > coords[:, 0].max().item()
+            assert self.coords.shape[0] == 0 or batch_size > self.coords[:, 0].max().item()
             self.batch_size = batch_size
 
-        self._cache = TensorCache()
+        self._cache = TensorCache() if cache is None else cache
 
     @property
     def F(self) -> torch.Tensor:
@@ -66,6 +75,9 @@ class SparseTensor:
 
     def dense(self) -> torch.Tensor:
         return to_dense(self.feats, self.coords, self.spatial_shape)
+    
+    def replace(self, feats):
+        return SparseTensor(feats, self.coords, self.spatial_shape, self.batch_size, self._cache)
 
     def __repr__(self):
         return (
@@ -76,14 +88,6 @@ class SparseTensor:
             f")"
         )
     
-class TensorCache:
-    def __init__(
-        self,
-    ) -> None:
-        self.cmaps: Dict[Tuple[int, ...], Tuple[torch.Tensor, Tuple[int, ...]]] = {}
-        self.kmaps: Dict[Tuple[Any, ...], Any] = {}
-        self.hashmaps: Dict[Tuple[int, ...], Tuple[Any, ...]] = {}
-
 def randn(
     spatial_shape: Tuple[int, ...],
     batch_size: int = 1,
@@ -93,12 +97,39 @@ def randn(
     dtype: torch.dtype = torch.float32,
 ) -> SparseTensor:
     
-    feats = torch.randn(nnz, channels, device=device, dtype=dtype)
+    # 1. 충분한 양의 유니크 좌표가 확보될 때까지 루프
+    # (randint 후 unique를 거는 방식이 공간이 클 때 permutation보다 훨씬 빠름)
+    all_coords = []
+    current_nnz = 0
+    
+    # 좌표 타입 (get_coords_dtype() 대신 직접 지정하거나 호출)
+    c_dtype = get_coords_dtype()
+    
+    while current_nnz < nnz:
+        # 부족한 개수만큼 랜덤 생성 (충돌 대비 1.2배 더 생성)
+        needed = (nnz - current_nnz)
+        sample_size = int(needed * 1.2) if current_nnz > 0 else nnz
+        
+        temp_list = [torch.randint(0, batch_size, (sample_size, 1), device=device, dtype=c_dtype)]
+        for dim_size in spatial_shape:
+            temp_list.append(torch.randint(0, dim_size, (sample_size, 1), device=device, dtype=c_dtype))
+        
+        new_coords = torch.cat(temp_list, dim=1)
+        
+        # 기존 좌표와 합친 후 중복 제거
+        if len(all_coords) > 0:
+            all_coords = torch.cat([all_coords, new_coords], dim=0)
+        else:
+            all_coords = new_coords
+            
+        all_coords = torch.unique(all_coords, dim=0)
+        current_nnz = all_coords.shape[0]
 
-    coords_list = [torch.randint(0, batch_size, (nnz, 1), device=device, dtype=get_coords_dtype())]
-    for dim_size in spatial_shape:
-        coords_list.append(torch.randint(0, dim_size, (nnz, 1), device=device, dtype=get_coords_dtype()))
-    coords = torch.cat(coords_list, dim=1)
+    # 2. 정확히 nnz 개수만큼 슬라이싱
+    coords = all_coords[:nnz]
+    
+    # 3. 피처 생성 (좌표 개수에 맞춤)
+    feats = torch.randn(nnz, channels, device=device, dtype=dtype)
 
     return SparseTensor(feats, coords, spatial_shape=spatial_shape)
 

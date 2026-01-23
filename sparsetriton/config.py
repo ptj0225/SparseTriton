@@ -1,14 +1,23 @@
 import torch
+from enum import Enum
 
-__all__ = ["set_coords_dtype", "get_coords_dtype"]
+class ConvAlgo(Enum):
+    ImplicitHashMapGEMM = "Implicit_hashmap_gemm"
+    ImplicitHashFlyGEMM = "Implicit_hashfly_gemm"
 
-_coords_dtype = torch.int16
+_STATE = {
+    "coords_dtype": torch.int16,
+    "algo": ConvAlgo.ImplicitHashFlyGEMM
+}
 
+def set_coords_dtype(dtype: torch.dtype):
+    _STATE["coords_dtype"] = dtype
 
-def set_coords_dtype(dtype: torch.dtype) -> None:
-    global _coords_dtype
-    _coords_dtype = dtype
+def get_coords_dtype():
+    return _STATE["coords_dtype"]
 
+def set_conv_algo(algo: ConvAlgo):
+    _STATE["algo"] = algo
 
-def get_coords_dtype() -> torch.dtype:
-    return _coords_dtype
+def get_conv_algo() -> ConvAlgo:
+    return _STATE["algo"]

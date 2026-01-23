@@ -110,7 +110,7 @@ class ToDenseFunction(Function):
         coords = coords.contiguous().to(get_coords_dtype())
         
         output_shape = (batch_size,) + spatial_range + (feats.size(1),)
-        outputs = torch.empty(
+        outputs = torch.zeros(
             output_shape, dtype=feats.dtype, device=feats.device
         )
 

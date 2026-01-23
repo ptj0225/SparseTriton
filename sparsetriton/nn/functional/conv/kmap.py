@@ -5,9 +5,18 @@ from sparsetriton.utils.hash import hash_coords_kernel, flatten_coords_kernel, H
 from sparsetriton.utils import mask_spatial_range
 from typing import *
 
-__all__ = ["get_neighbor_map", "build_kmap"]
+__all__ = ["get_neighbor_map", "build_out_coords"]
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE': 128}, num_warps=4),
+        triton.Config({'BLOCK_SIZE': 256}, num_warps=4),
+        triton.Config({'BLOCK_SIZE': 512}, num_warps=8),
+        triton.Config({'BLOCK_SIZE': 1024}, num_warps=8),
+    ],
+    key=['K'],
+)
 @triton.jit
 def expand_coords_kernel(
     in_ptr,           # 입력 좌표 포인터 (N, 4)
@@ -42,6 +51,46 @@ def expand_coords_kernel(
     tl.store(out_row_ptr + 1, x_in + x_off, mask=mask)
     tl.store(out_row_ptr + 2, y_in + y_off, mask=mask)
     tl.store(out_row_ptr + 3, z_in + z_off, mask=mask)
+
+@triton.jit
+def filter_unique_kernel(
+    coords_ptr,
+    hash_keys_ptr,
+    mask_ptr,
+    table_size,
+    N,
+    BLOCK_SIZE: tl.constexpr
+):
+    """
+    전역 해시 테이블을 사용하여 현재 좌표 뭉치 중 '처음 발견된' 것들만 마스킹합니다.
+    """
+    pid = tl.program_id(0)
+    idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = idx < N
+
+    b = tl.load(coords_ptr + idx * 4 + 0, mask=mask)
+    x = tl.load(coords_ptr + idx * 4 + 1, mask=mask)
+    y = tl.load(coords_ptr + idx * 4 + 2, mask=mask)
+    z = tl.load(coords_ptr + idx * 4 + 3, mask=mask)
+
+    # 좌표를 64비트 키로 압축
+    h = hash_coords_kernel(b, x, y, z)
+
+    is_unique = tl.zeros((BLOCK_SIZE,), dtype=tl.int1)
+    active = mask
+    step = 0
+    while (tl.max(active.to(tl.int32), axis=0) > 0) & (step < 1024):
+        curr_h = (h + step) % table_size
+        cmp_val = tl.where(active, tl.cast(-1, tl.int32), tl.cast(-2, tl.int32))
+        old = tl.atomic_cas(hash_keys_ptr + curr_h, cmp_val, h)
+        
+        is_unique = is_unique | (active & (old == -1))
+        
+        done = (old == -1) | (old == h)
+        active = active & (~done)
+        step += 1
+            
+    tl.store(mask_ptr + idx, is_unique, mask=mask)
 
 @triton.jit
 def get_neighbor_map_kernel(
@@ -193,6 +242,17 @@ def build_out_in_map(
 
 #     return out_coords, new_spatial_shape
 
+def build_kernel_offsets(kernel_size, dilation, device, dtype):
+    axes = [torch.arange(s, device=device) - (s // 2) for s in kernel_size]
+    
+    # 2. meshgrid로 모든 조합 생성 (X, Y, Z 순서 명시)
+    grid = torch.meshgrid(*axes, indexing='ij') # 'ij'는 X-Y-Z 순서 유지
+    
+    # 3. 팽창(dilation) 적용 후 합치기
+    # kernel_offsets = torch.stack(grid, dim=-1).reshape(-1, 3) * dilation
+    kernel_offsets = torch.stack(grid, dim=-1).flip(-1).reshape(-1, 3) * dilation
+    return kernel_offsets.to(dtype)
+    
 def build_out_coords(
     in_coords: torch.Tensor,
     spatial_shape: Tuple[int, int, int],
@@ -219,68 +279,81 @@ def build_out_coords(
     ks = torch.tensor([kernel_size] * 3, device=device)
     dil = torch.tensor([dilation] * 3, device=device)
     pad = torch.tensor([padding] * 3, device=device)
+    st = torch.tensor([stride] * 3, device=device)
 
     K_N = int(torch.prod(ks).item())
+    kernel_offsets = build_kernel_offsets(ks, dil, device, in_coords.dtype)
     
-    # 커널 오프셋 생성 (기존 로직과 동일)
-    kernel_mult = torch.tensor([ks[1]*ks[2], ks[2], 1], device=device)
-    k_arange = torch.arange(0, K_N, device=device).view(-1, 1).repeat(1, 3)
-    base_offsets = (k_arange // kernel_mult % ks - ks // 2) * dil
-    
-    # Padding과 Center Shift를 미리 오프셋에 반영하여 "최종 더할 값"을 만듦
-    # 로직: (in + padding) + offset - (kernel * dilation // 2)
-    #    => in + (padding + offset - shift)
-    shift = (ks * dil // 2)
-    final_offsets = base_offsets + pad - shift # (K, 3) 형태
-    
-    # --- 2. Triton 커널 실행 (메모리 할당 및 좌표 확장) ---
-    out_coords = torch.empty((N * K_N, 4), dtype=in_coords.dtype, device=device)
-    out_range = torch.arange(N * K_N, device=device)
-    grid = lambda meta: (triton.cdiv(N * K_N, meta['BLOCK_SIZE']), )
-    
-    expand_coords_kernel[grid](
-        in_coords, final_offsets, out_coords,
-        N, K_N,
-        in_coords.stride(0), in_coords.stride(1),
-        final_offsets.stride(0), final_offsets.stride(1),
-        out_coords.stride(0), out_coords.stride(1),
-        BLOCK_SIZE=1024
-    )
-    
-    unique_indices = coalesce_coords(out_coords) 
-    unique_out_in_map = out_coords[unique_indices]
-    in_out_map = torch.full((len(unique_out_in_map), K_N), -1, device=device)
-
-    hash_table = HashTable(capacity = 2 * len(unique_out_in_map), device=device)
-    hash_table.insert(unique_out_in_map)
-    q_out = hash_table.query(out_coords)
-    in_out_map[q_out, out_range % K_N] = out_range // K_N
-    del out_range
-    out_coords = unique_out_in_map
-
-
-    # Spatial Masking (범위 체크) - Triton 안에서 할 수도 있지만 여기서도 충분히 빠름
-    # 필요하다면 이 부분도 Triton 커널 안에 'if'문으로 넣어 필터링 가능
     new_spatial_shape = torch.tensor([(s - k + 2*p) // st + 1 
                                       for s, k, p, st in zip(spatial_shape, ks, pad, [stride]*3)], 
                                      device=device)
-    mask = mask_spatial_range(
-        out_coords,
-        x_lim=(0, new_spatial_shape[0]),
-        y_lim=(0, new_spatial_shape[1]),
-        z_lim=(0, new_spatial_shape[2]),
-        )
-    
-    out_coords = out_coords[mask]
-    in_out_map = in_out_map[mask]
 
-    return out_coords, in_out_map, new_spatial_shape
+    out_coords_list = []
+    # 전역 해시 테이블을 사용하여 모든 청크에 대해 중복을 체크함
+    # N * 10 정도면 충돌이 매우 적어 효율적임
+    hash_table_size = N * K_N * 2
+    global_hash_keys = torch.full((hash_table_size,), -1, dtype=torch.int32, device=device)
+    
+    CHUNK_SIZE = 1
+    
+    for i in range(0, K_N, CHUNK_SIZE):
+        curr_offsets = kernel_offsets[i : i + CHUNK_SIZE]
+        curr_K = curr_offsets.shape[0]
+        
+        # 1. 현재 청크만큼만 좌표 확장 (N * CHUNK_SIZE)
+        chunk_out = torch.empty((N * curr_K, 4), dtype=in_coords.dtype, device=device)
+        grid = lambda meta: (triton.cdiv(N * curr_K, meta['BLOCK_SIZE']), )
+        expand_coords_kernel[grid](
+            in_coords, curr_offsets, chunk_out,
+            N, curr_K,
+            in_coords.stride(0), in_coords.stride(1),
+            curr_offsets.stride(0), curr_offsets.stride(1),
+            chunk_out.stride(0), chunk_out.stride(1)
+        )
+        # 2. 스트라이드 필터링 및 다운샘플링
+        if stride > 1:
+            mask_st = torch.all(chunk_out[:, 1:] % stride == 0, dim=1)
+            chunk_out = chunk_out[mask_st]
+            
+        chunk_out[:, 1:] //= stride
+        
+        # 3. 공간 범위 필터링 (유효한 인덱스만 남김)
+        mask_range = mask_spatial_range(
+            chunk_out, 
+            (0, new_spatial_shape[0]-1), 
+            (0, new_spatial_shape[1]-1), 
+            (0, new_spatial_shape[2]-1)
+        )
+        chunk_out = chunk_out[mask_range]
+        
+        if chunk_out.shape[0] > 0:
+            # 전역 해시 테이블을 사용하여 이전에 발견되지 않은 새로운 좌표만 필터링
+            num_chunk = chunk_out.shape[0]
+            is_unique_mask = torch.empty((num_chunk,), dtype=torch.bool, device=device)
+            grid_filter = lambda meta: (triton.cdiv(num_chunk, meta['BLOCK_SIZE']), )
+            filter_unique_kernel[grid_filter](
+                chunk_out, global_hash_keys, is_unique_mask,
+                hash_table_size, num_chunk,
+                BLOCK_SIZE=1024
+            )
+            
+            new_unique = chunk_out[is_unique_mask]
+            if new_unique.shape[0] > 0:
+                out_coords_list.append(new_unique)
+            
+    if not out_coords_list:
+        return torch.empty((0, 4), dtype=in_coords.dtype, device=device), new_spatial_shape
+
+    # 이미 전역적으로 중복이 제거되었으므로 단 한 번의 cat만 수행하여 메모리 피크 최소화
+    final_coords = torch.cat(out_coords_list, dim=0)
+    return final_coords, new_spatial_shape
 
 def test_build_out_coords():
     # 1. 설정 (3x3x3 공간의 중심 근처에 점 2개 배치)
-    spatial_shape = (1000, 1000, 1000)
+    spatial_shape = (1000, 1000, 10000)
     # (Batch, X, Y, Z) 형식
-    in_coords = torch.randint(0, 100, (1_000_000, 4), dtype=torch.int16, device="cuda")
+    in_coords = torch.randint(0, 5000, (5_000_000, 4), dtype=torch.int16, device="cuda")
+    print(f"Allocated: {in_coords.element_size() * in_coords.nelement() / 1024**3:.2f} GB")
     in_coords[:, 0] = 0
     # in_coords = torch.tensor([
     #     [0, 0, 1, 1],
@@ -292,20 +365,20 @@ def test_build_out_coords():
     dilation = 1
     padding = 1
 
-    print(f"--- Test Configuration ---")
+    print(f"--- Test Configuration ---" )
     print(f"Input Shape: {spatial_shape}, Kernel: {kernel_size}, Stride: {stride}, Padding: {padding}")
     print(f"Input Coords:\n{in_coords}\n")
     from tqdm import tqdm
-
-    for _ in tqdm(range(1000)):
-        out_coords, out_in_map, new_spatial_shape = build_out_coords(
-            in_coords=in_coords,
-            spatial_shape=spatial_shape,
-            kernel_size=kernel_size,
-            stride=stride,
-            dilation=dilation,
-            padding=padding
-        )
+    with torch.no_grad():
+        for _ in tqdm(range(1000)):
+            out_coords, out_in_map, new_spatial_shape = build_out_coords(
+                in_coords=in_coords,
+                spatial_shape=spatial_shape,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                padding=padding
+            )
     print(new_spatial_shape)
     # 3. 결과 출력
     print(f"--- Output Results ---")
