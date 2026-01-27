@@ -7,7 +7,9 @@ class ConvAlgo(Enum):
 
 _STATE = {
     "coords_dtype": torch.int16,
-    "algo": ConvAlgo.ImplicitHashFlyGEMM
+    "algo": ConvAlgo.ImplicitHashFlyGEMM,
+    "h_tbl_factor": 2.0,
+    "h_tbl_max_probe_n": 32
 }
 
 def set_coords_dtype(dtype: torch.dtype):
@@ -21,3 +23,17 @@ def set_conv_algo(algo: ConvAlgo):
 
 def get_conv_algo() -> ConvAlgo:
     return _STATE["algo"]
+
+def set_h_table_f(factor: float): 
+    assert factor >= 1, "factor must be >= 1"
+    _STATE["h_tbl_factor"] = factor
+
+def get_h_table_f():
+    return _STATE["h_tbl_factor"]
+
+def set_h_table_max_p(probe_n: int):
+    _STATE["h_tbl_max_probe_n"] = probe_n
+
+def get_h_table_max_p():
+    return _STATE["h_tbl_max_probe_n"]
+    

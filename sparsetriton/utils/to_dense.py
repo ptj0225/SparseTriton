@@ -73,8 +73,6 @@ def _to_dense_bwd_kernel(
 
     mask_n = offs_n < N
     mask_c = offs_c < C
-
-    # Calculate output offset
     out_off_n = tl.zeros((BLOCK_N,), dtype=tl.int64)
     for d in range(D):
         coord_val = tl.load(coords_ptr + offs_n * D + d, mask=mask_n, other=0).to(tl.int64)
@@ -144,10 +142,12 @@ class ToDenseFunction(Function):
             BLOCK_C=64,
             D=D,
         )
-        return outputs
+        return outputs.contiguous()
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
+        grad_output = grad_output.contiguous()
+
         coords, spatial_strides = ctx.saved_tensors
         N, C, D = ctx.N, ctx.C, ctx.D
 

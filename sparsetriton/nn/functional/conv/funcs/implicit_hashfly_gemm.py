@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 import torch
-from sparsetriton.utils.hash import query_hash_table_impl, hash_coords_kernel
+from sparsetriton.utils.hash import query_hash_table_impl, hash_coords_kernel, hash_coords_kernel2
 
 @triton.autotune(
     configs=[
@@ -54,12 +54,14 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
         dx = tl.load(k_offsets_ptr + k * 3 )
         dy = tl.load(k_offsets_ptr + k * 3 + 1)
         dz = tl.load(k_offsets_ptr + k * 3 + 2)
-        curr_x = x + dx  # (BLOCK_SIZE_N,)
-        curr_y = y + dy  # (BLOCK_SIZE_N,)
-        curr_z = z + dz  # (BLOCK_SIZE_N,)
+        curr_x = x - dx  # (BLOCK_SIZE_N,)
+        curr_y = y - dy  # (BLOCK_SIZE_N,)
+        curr_z = z - dz  # (BLOCK_SIZE_N,)
         hashes = hash_coords_kernel(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
+        keys = hash_coords_kernel2(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
         in_indices = query_hash_table_impl(
             hashes,
+            keys,
             hash_table_keys_ptr,
             hash_table_vals_ptr,
             table_size,
@@ -86,10 +88,10 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
                 other=0.0
             )  # (BLOCK_SIZE_C_IN, BLOCK_SIZE_C_OUT)
 
-            acc = tl.dot(f_tile, w_tile, acc=acc)
+            acc = tl.dot(f_tile, w_tile, acc=acc, allow_tf32=False)
 
     out_off = off_n[:, None] * C_out + off_cout[None, :]  # (BLOCK_SIZE_N, BLOCK_SIZE_C_OUT)
-    tl.store(out_ptr + out_off, acc, mask=mask_n[:, None] & mask_cout[None, :])
+    tl.store(out_ptr + out_off, acc.to(out_ptr.dtype.element_ty), mask=mask_n[:, None] & mask_cout[None, :])
 
 @triton.autotune(
     configs=[
@@ -145,17 +147,19 @@ def implicit_gemm_bwd_feat_kernel(
         dy = tl.load(k_offsets_ptr + k * 3 + 1)
         dz = tl.load(k_offsets_ptr + k * 3 + 2)
         
-        curr_x = x + dx  # (BLOCK_SIZE_N,)
-        curr_y = y + dy  # (BLOCK_SIZE_N,)
-        curr_z = z + dz  # (BLOCK_SIZE_N,)
+        curr_x = x - dx  # (BLOCK_SIZE_N,)
+        curr_y = y - dy  # (BLOCK_SIZE_N,)
+        curr_z = z - dz  # (BLOCK_SIZE_N,)
         
         hashes = hash_coords_kernel(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
+        keys = hash_coords_kernel2(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
         in_indices = query_hash_table_impl(
-            hashes, hash_table_keys_ptr, hash_table_vals_ptr,
+            hashes, keys, hash_table_keys_ptr, hash_table_vals_ptr,
             table_size, off_n, N, BLOCK_SIZE_N
         )  # (BLOCK_SIZE_N,)
         
-        valid_mask = (in_indices >= 0) & mask_n  # (BLOCK_SIZE_N,)
+        valid_mask = (in_indices >= 0) & mask_n & (curr_x >= 0) & (curr_y >= 0) & (curr_z >= 0)
+        # valid_mask = (in_indices >= 0) & mask_n  # (BLOCK_SIZE_N,)
         
         acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_C_IN), dtype=tl.float32)  # (BLOCK_SIZE_N, BLOCK_SIZE_C_IN)
         
@@ -173,12 +177,14 @@ def implicit_gemm_bwd_feat_kernel(
                 weights_ptr + (k * C_in * C_out) + (off_cin[:, None] * C_out + off_cout[None, :]),
                 mask=mask_cin[:, None] & mask_cout[None, :],
                 other=0.0
-            )  # (BLOCK_SIZE_C_IN, BLOCK_SIZE_C_OUT)
-            
-            acc += tl.dot(do_tile, tl.trans(w_tile))
+            )  
+            acc = tl.dot(do_tile, tl.trans(w_tile), acc=acc, allow_tf32=False)
+            # (BLOCK_SIZE_C_IN, BLOCK_SIZE_C_OUT) -> Transpose to (BLOCK_SIZE_C_OUT, BLOCK_SIZE_C_IN)
+            # w_tile = tl.load(weights_ptr + (k * C_in * C_out) + (off_cin[None, :] + off_cout[:, None] * C_in), mask=mask_cin[None, :] & mask_cout[:, None], other=0.0)
+            # acc = tl.dot(do_tile, w_tile, acc=acc, allow_tf32=False)
             
         target_ptrs = d_features_ptr + in_indices[:, None] * C_in + off_cin[None, :]  # (BLOCK_SIZE_N, BLOCK_SIZE_C_IN)
-        tl.atomic_add(target_ptrs, acc, mask=valid_mask[:, None] & mask_cin[None, :])
+        tl.atomic_add(target_ptrs, acc.to(d_out_ptr.dtype.element_ty), mask=valid_mask[:, None] & mask_cin[None, :])
     
 @triton.autotune(
     configs=[
@@ -241,17 +247,19 @@ def implicit_gemm_bwd_weight_kernel(
     y = tl.load(coords_ptr + off_n * 4 + 2, mask=mask_n)  # (BLOCK_SIZE_N,)
     z = tl.load(coords_ptr + off_n * 4 + 3, mask=mask_n)  # (BLOCK_SIZE_N,)
     
-    curr_x = x + dx  # (BLOCK_SIZE_N,)
-    curr_y = y + dy  # (BLOCK_SIZE_N,)
-    curr_z = z + dz  # (BLOCK_SIZE_N,)
+    curr_x = x - dx  # (BLOCK_SIZE_N,)
+    curr_y = y - dy  # (BLOCK_SIZE_N,)
+    curr_z = z - dz  # (BLOCK_SIZE_N,)
     
     hashes = hash_coords_kernel(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
+    keys = hash_coords_kernel2(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
     in_indices = query_hash_table_impl(
-        hashes, hash_table_keys_ptr, hash_table_vals_ptr,
+        hashes, keys, hash_table_keys_ptr, hash_table_vals_ptr,
         table_size, off_n, N, BLOCK_SIZE_N
     )  # (BLOCK_SIZE_N,)
     
-    valid_mask = (in_indices >= 0) & mask_n  # (BLOCK_SIZE_N,)
+    # valid_mask = (in_indices >= 0) & mask_n  # (BLOCK_SIZE_N,)
+    valid_mask = (in_indices != -1) & mask_n & (curr_x >= 0) & (curr_y >= 0) & (curr_z >= 0)
     
     f_tile = tl.load(
         features_ptr + in_indices[:, None] * C_in + off_cin[None, :],
@@ -265,7 +273,7 @@ def implicit_gemm_bwd_weight_kernel(
         other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_C_OUT)
     
-    acc = tl.dot(tl.trans(f_tile), do_tile)
+    acc = tl.dot(tl.trans(f_tile), do_tile, allow_tf32=False)
     
     w_offset = (pid_k * C_in * C_out) + (off_cin[:, None] * C_out + off_cout[None, :])  # (BLOCK_SIZE_C_IN, BLOCK_SIZE_C_OUT)
     tl.atomic_add(d_weights_ptr + w_offset, acc.to(d_weights_ptr.dtype.element_ty), mask=mask_cin[:, None] & mask_cout[None, :])
@@ -284,11 +292,12 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
         N_in, C_in = features.shape
         K, _, C_out = weights.shape
         N_out = coords.shape[0]
-
+    
         # 커널 실행을 위한 텐서 준비 (contiguous 필수)
         features = features.contiguous()
         weights = weights.contiguous()
-
+        coords = coords.contiguous()
+        kernel_offsets = kernel_offsets.contiguous()
         # 출력 텐서 할당
         out_features = torch.zeros((N_out, C_out), device=features.device, dtype=features.dtype)
 
@@ -329,11 +338,13 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
         C_in = ctx.C_in
         C_out = ctx.C_out
         N_out = ctx.N_out
-        
+        kernel_offsets = kernel_offsets.contiguous()
+        weights = weights.contiguous()
         grad_output = grad_output.contiguous()
-        
+        hash_table_keys = hash_table_keys.contiguous()
+        hash_table_vals = hash_table_vals.contiguous()
         # 1. d_features
-        grad_input = torch.zeros_like(features)
+        grad_input = torch.zeros_like(features).contiguous()
         
         grid_feat = lambda META: (
             triton.cdiv(N_out, META['BLOCK_SIZE_N']),
@@ -354,7 +365,7 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
         )
 
         # 2. d_weights
-        grad_weights = torch.zeros_like(weights)
+        grad_weights = torch.zeros_like(weights).contiguous()
         grid_weight = lambda META: (
             triton.cdiv(N_out, META['BLOCK_SIZE_N']),
             K,

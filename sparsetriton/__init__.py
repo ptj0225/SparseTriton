@@ -1,2 +1,1 @@
-from .tensor import SparseTensor
-from .nn.modules import *
+from .tensor import SparseTensor, randn

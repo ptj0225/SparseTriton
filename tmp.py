@@ -1,53 +1,96 @@
-from sparsetriton.nn.modules.conv import Conv3d
-from sparsetriton import SparseTensor
-from sparsetriton.tensor import randn
-from tqdm import tqdm
-from torch import nn
 import torch
+import torch.nn.functional as F
+import pytest
+from sparsetriton.tensor import SparseTensor, randn
+from sparsetriton.nn.functional import sparse_conv3d
 
-class Net(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = Conv3d(16, 64, (3, 3, 3), 1, 1)
-        self.relu1 = nn.ReLU()
-        self.conv2 = Conv3d(64, 64, (3, 3, 3), 1, 1)
-        self.relu2 = nn.ReLU()
-        self.conv3 = Conv3d(64, 64, (3, 3, 3), 1, 1)
-        self.relu3 = nn.ReLU()
-        self.conv4 = Conv3d(64, 64, (3, 3, 3), 1, 1)
-        self.relu4 = nn.ReLU()
-        self.conv5 = Conv3d(64, 1, (3, 3, 3), 1, 1) # 변수명 중복 수정
+@pytest.mark.parametrize("C_in, C_out, kernel_size, stride, padding, dilation", [
+    (8, 16, 3, 1, 1, 1),
+    (4, 8, 3, 2, 1, 1),
+    (16, 16, 5, 1, 2, 1),
+])
+def test_sparse_conv3d_vs_torch_dense(C_in, C_out, kernel_size, stride, padding, dilation):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    def forward(self, x):
-        # SparseTensor의 특징값(.F)에 대해서만 ReLU를 적용하고 교체(replace)합니다.
-        x = self.conv1(x)
-        x = x.replace(feats=self.relu1(x.F))
-        
-        x = self.conv2(x)
-        x = x.replace(feats=self.relu2(x.F))
-        
-        x = self.conv3(x)
-        x = x.replace(feats=self.relu3(x.F))
-        
-        x = self.conv4(x)
-        x = x.replace(feats=self.relu4(x.F))
-        
-        x = self.conv5(x)
-        return x
-net = Net().to("cuda")
+    # 1. Create input sparse tensor
+    spatial_shape = (3, 3, 3)
+    st_tensor = randn(spatial_shape, batch_size=1, channels=C_in, nnz=27, device=device)
 
+    # st_tensor.F = torch.ones_like(st_tensor.F)
 
-optim = torch.optim.Adam(net.parameters())
-
-# x = randn((512, 512, 512), 10, 16, 512**3 // 100).to("cuda")
-y = 10
-
-for _ in tqdm(range(10000)):
-    x = randn((512, 512, 512), 1, 16, 512**3 // 20).to("cuda")
-    optim.zero_grad()
-    out = net(x)
-    loss = (out.F - y) ** 2
-    loss = loss.mean()
-    loss.backward()
+    # 2. Create convolution weight (K, C_in, C_out)
+    weight = torch.rand(kernel_size**3, C_in, C_out, device=device)
+    weight.requires_grad = True
     
-    optim.step()
+
+    # 3. Run sparsetriton convolution (submanifold=False for full comparison)
+    st_out_tensor = sparse_conv3d(
+        st_tensor.half(),
+        weight.half(),
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        submanifold=False,
+        transposed=True
+    ).float()
+
+    st_out_tensor.dense().sum().backward()
+    grad1 = weight.grad.clone()
+    print(grad1[:1])
+
+    weight.grad = None
+    st_out_tensor = sparse_conv3d(
+        st_tensor.half(),
+        weight.half(),
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        submanifold=False,
+        transposed=True
+    ).float()
+    st_out_tensor.F.sum().backward()
+    grad1 = weight.grad.clone()
+    print(grad1[:1])
+    weight.grad = None
+
+    # 4. Run torch dense convolution
+    # Weight: (K, C_in, C_out) -> (C_out, C_in, k, k, k)
+    k = kernel_size
+    weight_torch = weight.view(k, k, k, C_in, C_out).permute(3, 4, 0, 1, 2).contiguous()
+    # weight_torch = weight.view(k, k, k, C_in, C_out).permute(4, 3, 1, 0, 2).contiguous()
+    # weight_torch = weight.view(k, k, k, C_in, C_out).permute(4, 3, 0, 2, 1).contiguous()
+    # weight_torch = weight.view(k, k, k, C_in, C_out).permute(4, 3, 2, 1, 0).contiguous()
+    # weight_torch = weight.view(k, k, k, C_in, C_out).permute(4, 3, 2, 0, 1).contiguous()
+    # weight_torch = weight.view(k, k, k, C_in, C_out).permute(4, 3, 1, 2, 0).contiguous()
+    
+    # Input: Sparse -> Dense (N, D, H, W, C) -> (N, C, D, H, W)
+    dense_input = st_tensor.dense().permute(0, 4, 1, 2, 3).contiguous()
+    
+    dense_output = F.conv_transpose3d(
+        dense_input.half(),
+        weight_torch.half(),
+        stride=stride,
+        padding=padding,
+        dilation=dilation
+    ).float()
+    dense_output.sum().backward()
+    grad2 = weight.grad.clone()
+    # 5. Compare dense results
+    # st_out_tensor.dense() is (N, D_out, H_out, W_out, C_out)
+    # dense_output is (N, C_out, D_out, H_out, W_out)
+    st_dense_output = st_out_tensor.dense()
+    torch_dense_output = dense_output.permute(0, 2, 3, 4, 1).contiguous()
+    # print(st_dense_output.nonzero())
+    # print(torch_dense_output.nonzero())
+    # print(st_dense_output[..., -1])
+    # print(torch_dense_output[..., -1])
+    print((st_dense_output - torch_dense_output).abs().max())
+    assert st_dense_output.shape == torch_dense_output.shape, \
+        f"Shape mismatch: {st_dense_output.shape} vs {torch_dense_output.shape}"
+        
+    assert torch.allclose(st_dense_output, torch_dense_output, atol=1e-3, rtol=1e-3), \
+        f"Feature values mismatch. Max diff: {(st_dense_output - torch_dense_output).abs().max()}"
+    
+test_sparse_conv3d_vs_torch_dense(* (16, 16, 3, 2, 1, 1))

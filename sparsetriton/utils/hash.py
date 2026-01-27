@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sparsetriton.config import get_coords_dtype
+from sparsetriton.config import get_coords_dtype, get_h_table_max_p
 
 __all__ = ["HashTable", "flatten_coord", "hash_coords", "unflatten_coord"]
 
@@ -22,7 +22,14 @@ def hash_coords(coords:torch.Tensor) -> torch.Tensor:
 @triton.jit
 def hash_coords_kernel(b, x, y, z):
     """Simple spatial hashing function."""
-    return ((x.to(tl.int32) * 73856093) ^ (y.to(tl.int32) * 19349663) ^ (z.to(tl.int32) * 83492791) ^ (b.to(tl.int32) * 1000003)) & 0x7FFFFFFF
+    h = ((x.to(tl.int32) * 73856093) ^ (y.to(tl.int32) * 19349663) ^ (z.to(tl.int32) * 83492791) ^ (b.to(tl.int32) * 1000003))
+    return h & 0x7FFFFFFF
+
+@triton.jit
+def hash_coords_kernel2(b, x, y, z):
+    """Simple spatial hashing function."""
+    h = ((x.to(tl.int32) * 982451653) ^ (y.to(tl.int32) * 701000767) ^ (z.to(tl.int32) * 1610612741) ^ (b.to(tl.int32) * 67867979))
+    return h & 0x7FFFFFFF
 
 @triton.jit
 def flatten_coords_kernel(b, x, y, z):
@@ -43,7 +50,8 @@ def build_hash_table_kernel(
     coords_ptr, hash_keys_ptr, hash_vals_ptr,
     table_size, N,
     failure_ptr,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
+    max_probe_step: tl.constexpr=get_h_table_max_p()
 ):
     """
     Builds a hash table mapping packed coordinates to voxel indices.
@@ -61,20 +69,21 @@ def build_hash_table_kernel(
 
     # Pack coordinates into a unique key
     hash_val = hash_coords_kernel(b, x, y, z)
+    keys = hash_coords_kernel2(b, x, y, z)
 
     active_mask = mask 
 
     probe_step = 0
-    while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < 64):
+    while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < max_probe_step):
         # 활성화된 스레드만 해시 계산 및 atomic 연산 수행
         curr_hash = (hash_val + probe_step) % table_size
         
         # tl.atomic_cas는 마스크를 직접 지원하지 않으므로 
         compare_vals = tl.where(active_mask, tl.full((BLOCK_SIZE,), -1, dtype=tl.int32), tl.full((BLOCK_SIZE,), -2, dtype=tl.int32))
-        old_key = tl.atomic_cas(hash_keys_ptr + curr_hash, compare_vals, hash_val)
+        old_key = tl.atomic_cas(hash_keys_ptr + curr_hash, compare_vals, keys)
         
         # 삽입 성공 조건: 빈 자리(-1)였거나, 이미 내 키가 들어있거나
-        success = active_mask & ((old_key == -1) | (old_key == hash_val))
+        success = active_mask & ((old_key == -1) | (old_key == keys))
         
         # 이번 루프에서 성공했고, 아직 처리 중이었던 스레드만 store
         tl.store(hash_vals_ptr + curr_hash, idx, mask=success)
@@ -87,20 +96,22 @@ def build_hash_table_kernel(
 @triton.jit
 def query_hash_table_impl(
     hashes,
+    keys,
     table_keys_ptr,
     table_values_ptr,
     table_size,
     idx,
     N,
-    BLOCK_SIZE
+    BLOCK_SIZE,
+    max_probe_step: tl.constexpr = get_h_table_max_p()
 ):
     active_mask = idx < N 
     probe_step = 0
     result = tl.full((BLOCK_SIZE,), -1, dtype=tl.int32)
-    while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < 256):
+    while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < max_probe_step):
         curr_hash = (hashes + probe_step) % table_size
         loaded_key = tl.load(table_keys_ptr + curr_hash, mask=active_mask, other=-1)
-        found_mask = active_mask & (loaded_key == hashes)
+        found_mask = active_mask & (loaded_key == keys)
         empty_mask = loaded_key == -1
         val = tl.load(table_values_ptr + curr_hash, mask=found_mask, other=-1)
         result = tl.where(found_mask, val, result)
@@ -126,6 +137,7 @@ def query_hash_table_kernel(
     table_size,
     N,
     BLOCK_SIZE: tl.constexpr,
+    max_probe_step: tl.constexpr = get_h_table_max_p(),
 ):
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -140,31 +152,20 @@ def query_hash_table_kernel(
     hash = hash_coords_kernel(
         b, x, y, z
     ) % table_size
-
-    probe_step = 0
-    active_mask = mask 
-
+    keys = hash_coords_kernel2(b, x, y, z)
     query_out = query_hash_table_impl(
         hashes=hash,
+        keys=keys,
         table_keys_ptr=table_keys_ptr,
         table_values_ptr=table_values_ptr,
         table_size=table_size,
         idx=idx,
         N=N,
-        BLOCK_SIZE=BLOCK_SIZE
+        BLOCK_SIZE=BLOCK_SIZE,
+        max_probe_step= max_probe_step
     )
     store_mask = (query_out != -1) & mask
     tl.store(out_values_ptr + idx, query_out, mask=store_mask)
-
-    # while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < 256):
-    #     curr_hash = (hash + probe_step) % table_size
-    #     loaded_key = tl.load(table_keys_ptr + curr_hash, mask=active_mask, other=-1)
-    #     write_mask = active_mask & (loaded_key == key)
-    #     val = tl.load(table_values_ptr + curr_hash, mask=write_mask, other=-1)
-    #     tl.store(out_values_ptr + idx, val, mask=write_mask)
-    #     is_empty_slot = (loaded_key == -1)
-    #     active_mask = active_mask & (~write_mask) & (~is_empty_slot)
-    #     probe_step += 1
 
 @triton.autotune(
     configs=[
@@ -271,7 +272,8 @@ class HashTable:
             self.table_values, # hash_vals_ptr
             self.capacity,     # table_size
             N,                 # N
-            failure
+            failure,
+            max_probe_step = get_h_table_max_p()
         )
         failure_n = torch.sum(failure).item()
         if (failure_n > 0):
@@ -284,6 +286,6 @@ class HashTable:
         
         query_hash_table_kernel[grid](
             keys, out_values, self.table_keys, self.table_values, 
-            self.capacity, N
+            self.capacity, N, max_probe_step = get_h_table_max_p()
         )
         return out_values

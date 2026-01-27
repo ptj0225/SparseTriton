@@ -126,10 +126,10 @@ def randn(
         current_nnz = all_coords.shape[0]
 
     # 2. 정확히 nnz 개수만큼 슬라이싱
-    coords = all_coords[:nnz]
+    coords = all_coords[:nnz].contiguous()
     
     # 3. 피처 생성 (좌표 개수에 맞춤)
-    feats = torch.randn(nnz, channels, device=device, dtype=dtype)
+    feats = torch.randn(nnz, channels, device=device, dtype=dtype).contiguous()
 
     return SparseTensor(feats, coords, spatial_shape=spatial_shape)
 
