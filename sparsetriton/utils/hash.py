@@ -49,7 +49,6 @@ def flatten_coords_kernel(b, x, y, z):
 def build_hash_table_kernel(
     coords_ptr, hash_keys_ptr, hash_vals_ptr,
     table_size, N,
-    failure_ptr,
     BLOCK_SIZE: tl.constexpr,
     max_probe_step: tl.constexpr=get_h_table_max_p()
 ):
@@ -91,7 +90,6 @@ def build_hash_table_kernel(
         # 성공한 스레드는 다음 루프부터 제외
         active_mask = active_mask & (~success)
         probe_step += 1
-    tl.store(failure_ptr + pid, tl.sum(active_mask).to(tl.int32))
 
 @triton.jit
 def query_hash_table_impl(
@@ -264,7 +262,6 @@ class HashTable:
 
         grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']),)
         # 최소 BLOCK_SIZE가 128이므로 안전하게 N // 128 + 1 크기로 할당
-        failure = torch.zeros((triton.cdiv(N, 128),), dtype=torch.int32, device=self.device)
 
         build_hash_table_kernel[grid](
             keys,           # coords_ptr
@@ -272,12 +269,8 @@ class HashTable:
             self.table_values, # hash_vals_ptr
             self.capacity,     # table_size
             N,                 # N
-            failure,
             max_probe_step = get_h_table_max_p()
         )
-        failure_n = torch.sum(failure).item()
-        if (failure_n > 0):
-            print(f"Warning: {failure_n} keys could not be inserted into the hash table due to excessive collisions.")
 
     def query(self, keys: torch.Tensor) -> torch.Tensor:
         N = keys.shape[0]
