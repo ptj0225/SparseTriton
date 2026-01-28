@@ -1,0 +1,9 @@
+- [ ] `sparsetriton/nn/functional/conv/funcs/`에 다양한 희소 합성곱 커널 (sparse convolution kernels) 추가 또는 기존 커널 최적화.
+- [ ] `sparsetriton/nn/modules/`에 더 많은 신경망 레이어(예: sparse pooling, recurrent layers, attention mechanisms) 구현.
+- [ ] `sparsetriton/utils/`에 희소 텐서 연산을 위한 추가 유틸리티 함수 개발.
+- [ ] `mmdetection3d/ts_plugin/models/backbones/`에 ResNet 외의 다른 3D 검출 백본 아키텍처 (예: VGG, PointNet++) 통합.
+- [ ] `mmdetection3d/ts_plugin/models/middle_encoders/`에 새로운 중간 인코더 유형 또는 변형 (예: 더 효율적인 희소 볼륨 처리) 구현.
+- [ ] `mmdetection3d/ts_plugin/models/roi_heads/bbox_heads/`에 PartA2 외의 다른 3D 바운딩 박스 헤드 또는 검출 헤드 (예: CenterPoint, VoteNet) 구현.
+- [ ] 코어 기능 및 신규 구현에 대한 포괄적인 단위 및 통합 테스트 작성.
+- [ ] 프로젝트 전반에 걸친 문서화 강화 및 코드 주석 개선.
+- [ ] 주요 연산 및 모델 구성 요소에 대한 성능 벤치마킹 및 최적화.

@@ -4,6 +4,7 @@ import torch
 from sparsetriton import SparseTensor
 import triton
 import triton.language as tl
+from sparsetriton.utils.hash import flatten_coord, unflatten_coord
 
 # --- Sparse Pooling ---
 class SparsePoolingFunction(torch.autograd.Function):
@@ -17,39 +18,96 @@ class SparsePoolingFunction(torch.autograd.Function):
     )
     @triton.jit
     def _sparse_pooling_forward_kernel(
-        in_coords_ptr, in_feats_ptr,
-        out_coords_ptr, out_feats_ptr,
-        N_IN, N_OUT, # Number of input/output non-zero elements
+        in_feats_ptr, out_feats_ptr,
+        map_ptr, count_ptr,
+        N_IN, C,
+        MODE: tl.constexpr, # 0: max, 1: avg
         BLOCK_SIZE: tl.constexpr,
-        # TODO: Add other necessary parameters like kernel_size, stride, etc.
-        # This is where the core logic will go.
+        BLOCK_C: tl.constexpr
     ):
-        pass # Placeholder for Triton JIT kernel
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N_IN
+        
+        out_idx = tl.load(map_ptr + offs, mask=mask, other=-1)
+        active = (out_idx != -1) & mask
+        
+        in_base_ptr = in_feats_ptr + offs[:, None] * C
+        out_base_ptr = out_feats_ptr + out_idx[:, None] * C
+        
+        for c_start in range(0, C, BLOCK_C):
+            c_offs = c_start + tl.arange(0, BLOCK_C)
+            c_mask = c_offs < C
+            op_mask = active[:, None] & c_mask[None, :]
+            
+            val = tl.load(in_base_ptr + c_offs[None, :], mask=op_mask, other=0.0)
+            target_ptr = out_base_ptr + c_offs[None, :]
+            
+            if MODE == 0: # MAX
+                tl.atomic_max(target_ptr, val, mask=op_mask)
+            elif MODE == 1: # AVG
+                tl.atomic_add(target_ptr, val, mask=op_mask)
 
     @staticmethod
-    def forward(ctx, input_tensor: SparseTensor, kernel_size, stride, padding, dilation, ceil_mode, return_indices):
-        # TODO: Implement actual data preparation and kernel launch
-        # For now, just save inputs and return a dummy SparseTensor
+    def forward(ctx, feats, coords, spatial_shape, batch_size, kernel_size, stride, padding, mode='max'):
+        if stride is None:
+            stride = kernel_size
+            
+        # coords = input_tensor.C
+        device = coords.device
         
-        # Example of saving for backward pass (adjust based on actual needs)
-        ctx.save_for_backward(input_tensor.F, input_tensor.C) # Save features and coordinates
-        ctx.kernel_size = kernel_size
-        ctx.stride = stride
-        # ... save other parameters
-
-        # Placeholder for output
-        output_feats = torch.empty((0, input_tensor.F.shape[1]), device=input_tensor.F.device, dtype=input_tensor.F.dtype)
-        output_coords = torch.empty((0, 4), device=input_tensor.C.device, dtype=input_tensor.C.dtype)
+        # Map inputs to outputs (Downsampling logic)
+        spatial_coords = coords[:, 1:]
+        out_spatial = (spatial_coords + padding) // stride
+        out_coords_full = torch.cat([coords[:, :1], out_spatial], dim=1)
+        flat_coords = flatten_coord(out_coords_full)
+        unique_flat, inverse_indices = torch.unique(flat_coords, sorted=True, return_inverse=True)
+        unique_coords = unflatten_coord(unique_flat)
         
-        # Example kernel call (will need actual implementation)
-        # N_IN = input_tensor.F.shape[0]
-        # _sparse_pooling_forward_kernel[N_IN](
-        #    input_tensor.C, input_tensor.F,
-        #    output_coords, output_feats,
-        #    N_IN, N_OUT, # N_OUT would be determined by the pooling logic
-        # )
+        N_IN, C = feats.shape
+        N_OUT = unique_coords.shape[0]
+        out_feats = torch.empty((N_OUT, C), device=device, dtype=feats.dtype)
 
-        return SparseTensor(output_feats, output_coords, spatial_shape=(1,1,1), batch_size=1) # Dummy return
+        mode_const = 0
+        if mode == 'max':
+            out_feats.fill_(float('-inf'))
+            mode_const = 0
+        elif mode == 'avg':
+            out_feats.fill_(0.0)
+            mode_const = 1
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
+            
+        # Optimization: Use torch.bincount instead of atomic_add in kernel
+        if mode == 'avg':
+            count = torch.bincount(inverse_indices, minlength=N_OUT).to(feats.dtype).view(-1, 1).clamp(min=1)
+        else:
+            count = None
+        
+        grid = lambda meta: (triton.cdiv(N_IN, meta['BLOCK_SIZE']), )
+        BLOCK_C = 64
+        if C < 64: BLOCK_C = triton.next_power_of_2(C)
+        
+        SparsePoolingFunction._sparse_pooling_forward_kernel[grid](
+            in_feats_ptr=feats,
+            out_feats_ptr=out_feats,
+            map_ptr=inverse_indices,
+            count_ptr=count if count is not None else inverse_indices,
+            N_IN=N_IN, C=C,
+            MODE=mode_const,
+            BLOCK_C=BLOCK_C
+        )
+        
+        if mode == 'avg':
+            out_feats = out_feats / count
+            
+        ctx.save_for_backward(feats, coords, inverse_indices, out_feats, count)
+        ctx.mode = mode
+        ctx.N_IN = N_IN
+        
+        new_spatial_shape = tuple((s + 2*padding - kernel_size)//stride + 1 for s in spatial_shape)
+        
+        return out_feats, unique_coords, new_spatial_shape, batch_size
 
     @staticmethod
     @triton.autotune(
@@ -57,47 +115,88 @@ class SparsePoolingFunction(torch.autograd.Function):
             triton.Config({'BLOCK_SIZE': 128}, num_warps=4),
             triton.Config({'BLOCK_SIZE': 256}, num_warps=8),
         ],
-        key=['N_OUT'], # Key for autotuning. N_OUT would be number of output non-zero elements.
+        key=['N_IN'],
     )
     @triton.jit
     def _sparse_pooling_backward_kernel(
         grad_out_feats_ptr, # Gradient from subsequent layer
-        in_coords_ptr, # Original input coordinates
         grad_in_feats_ptr, # Gradient to propagate back to input features
-        N_OUT, N_IN, # Number of output/input non-zero elements
+        in_feats_ptr, out_feats_ptr,
+        map_ptr, count_ptr,
+        N_IN, C,
+        MODE: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
-        # TODO: Add other necessary parameters
+        BLOCK_C: tl.constexpr
     ):
-        pass # Placeholder for Triton JIT kernel
+        pid = tl.program_id(0)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < N_IN
+        
+        out_idx = tl.load(map_ptr + offs, mask=mask, other=-1)
+        active = (out_idx != -1) & mask
+        
+        in_base_ptr = in_feats_ptr + offs[:, None] * C
+        grad_in_base_ptr = grad_in_feats_ptr + offs[:, None] * C
+        out_base_ptr = out_feats_ptr + out_idx[:, None] * C
+        grad_out_base_ptr = grad_out_feats_ptr + out_idx[:, None] * C
+
+        if MODE == 1: # AVG
+            cnt = tl.load(count_ptr + out_idx, mask=active, other=1.0)[:, None]
+        
+        for c_start in range(0, C, BLOCK_C):
+            c_offs = c_start + tl.arange(0, BLOCK_C)
+            c_mask = c_offs < C
+            op_mask = active[:, None] & c_mask[None, :]
+
+            grad_out = tl.load(grad_out_base_ptr + c_offs[None, :], mask=op_mask, other=0.0)
+            grad_val = 0.0
+            
+            if MODE == 0: # MAX
+                in_val = tl.load(in_base_ptr + c_offs[None, :], mask=op_mask, other=0.0)
+                out_val = tl.load(out_base_ptr + c_offs[None, :], mask=op_mask, other=0.0)
+                is_max = (in_val == out_val)
+                grad_val = tl.where(is_max, grad_out, 0.0)
+            elif MODE == 1: # AVG
+                grad_val = grad_out / cnt
+                
+            tl.store(grad_in_base_ptr + c_offs[None, :], grad_val, mask=op_mask)
 
     @staticmethod
-    def backward(ctx, grad_output: SparseTensor):
-        # TODO: Implement actual data preparation and kernel launch for backward
-        input_feats, input_coords = ctx.saved_tensors
-        kernel_size = ctx.kernel_size
-        stride = ctx.stride
-        # ... retrieve other parameters
+    def backward(ctx, grad_out_feats, grad_out_coords, grad_spatial_shape, grad_batch_size):
+        in_feats, in_coords, map_tensor, out_feats, count = ctx.saved_tensors
+        mode = ctx.mode
+        N_IN = ctx.N_IN
+        C = in_feats.shape[1]
+        
+        grad_in = torch.zeros_like(in_feats)
+        
+        grid = lambda meta: (triton.cdiv(N_IN, meta['BLOCK_SIZE']), )
+        BLOCK_C = 64
+        if C < 64: BLOCK_C = triton.next_power_of_2(C)
+        
+        mode_const = 0 if mode == 'max' else 1
+        
+        SparsePoolingFunction._sparse_pooling_backward_kernel[grid](
+            grad_out_feats_ptr=grad_out_feats,
+            grad_in_feats_ptr=grad_in,
+            in_feats_ptr=in_feats,
+            out_feats_ptr=out_feats,
+            map_ptr=map_tensor,
+            count_ptr=count if count is not None else map_tensor,
+            N_IN=N_IN, C=C,
+            MODE=mode_const,
+            BLOCK_C=BLOCK_C
+        )
+        
+        return grad_in, None, None, None, None, None, None, None
 
-        grad_input_feats = torch.zeros_like(input_feats)
-        grad_input_coords = None # Coordinates typically not differentiated
 
-        # Example kernel call (will need actual implementation)
-        # N_OUT = grad_output.F.shape[0]
-        # _sparse_pooling_backward_kernel[N_OUT](
-        #    grad_output.F,
-        #    input_coords,
-        #    grad_input_feats,
-        #    N_OUT, N_IN,
-        # )
-
-        return grad_input_feats, None, None, None, None, None, None # Return gradients for each input to forward
-
-
-def sparse_pooling(input: SparseTensor, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False) -> SparseTensor:
-    """
-    Placeholder for sparse pooling operation.
-    """
-    return SparsePoolingFunction.apply(input, kernel_size, stride, padding, dilation, ceil_mode, return_indices)
+def sparse_pooling(input: SparseTensor, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False, mode='max') -> SparseTensor:
+    out_feats, out_coords, new_spatial_shape, batch_size = SparsePoolingFunction.apply(
+        input.F, input.C, input.spatial_shape, input.batch_size,
+        kernel_size, stride, padding, mode
+    )
+    return SparseTensor(out_feats, out_coords, spatial_shape=new_spatial_shape, batch_size=batch_size)
 
 # --- Sparse Upsample ---
 class SparseUpsampleFunction(torch.autograd.Function):
@@ -164,9 +263,9 @@ class SparseUpsampleFunction(torch.autograd.Function):
                         
                         if c_start == 0:
                             tl.store(out_coords_ptr + curr_out_offs * 4 + 0, in_b, mask=out_mask)
-                            tl.store(out_coords_ptr + curr_out_offs * 4 + 1, in_x + dx, mask=out_mask)
-                            tl.store(out_coords_ptr + curr_out_offs * 4 + 2, in_y + dy, mask=out_mask)
-                            tl.store(out_coords_ptr + curr_out_offs * 4 + 3, in_z + dz, mask=out_mask)
+                            tl.store(out_coords_ptr + curr_out_offs * 4 + 1, in_x * scale_factor + dx, mask=out_mask)
+                            tl.store(out_coords_ptr + curr_out_offs * 4 + 2, in_y * scale_factor + dy, mask=out_mask)
+                            tl.store(out_coords_ptr + curr_out_offs * 4 + 3, in_z * scale_factor + dz, mask=out_mask)
                         
                         step += 1
 
@@ -202,8 +301,8 @@ class SparseUpsampleFunction(torch.autograd.Function):
     @staticmethod
     @triton.autotune(
         configs=[
-            triton.Config({'BLOCK_SIZE': 128}, num_warps=4),
-            triton.Config({'BLOCK_SIZE': 256}, num_warps=8),
+            triton.Config({'BLOCK_SIZE_N': 128}, num_warps=4),
+            triton.Config({'BLOCK_SIZE_N': 256}, num_warps=8),
         ],
         key=['scale_factor'],
     )
@@ -221,26 +320,28 @@ class SparseUpsampleFunction(torch.autograd.Function):
         in_mask = in_offs < N_IN
         prod_scale = scale_factor * scale_factor * scale_factor
 
-        for c in range(0, C, BLOCK_SIZE_N):
-            c_off = c + tl.arange(0, BLOCK_SIZE_N)
+        for c in range(0, C, BLOCK_SIZE_C):
+            c_off = c + tl.arange(0, BLOCK_SIZE_C)
             c_mask = c_off < C
-            acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_N), dtype=tl.)
-
+            acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_C), dtype=grad_in_feats_ptr.dtype.element_ty)
             for step in range(prod_scale):
-                pass
-
+                out_offs = in_offs * prod_scale + step
+                out_mask = out_offs < N_OUT
+                acc += tl.load(
+                    grad_out_feats_ptr + out_offs[:, None] * C + c_off[None, :], 
+                    mask = out_mask[:, None] & c_mask,
+                    other = 0
+                )
             tl.store(
                 grad_in_feats_ptr + in_offs[:, None] * C + c_off[None, :], 
-                acc.to(grad_in_feats_ptr.dtype.element_ty), 
+                acc,
                 mask = in_mask[:, None] & c_mask[None, :]
             )
 
-
-            
             
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
+    def backward(ctx, grad_output: torch.Tensor, output_coords, new_spatial_shape):
         grad_output = grad_output.contiguous()
         N_OUT, C = grad_output.shape
         N_IN = ctx.N_IN
@@ -248,6 +349,16 @@ class SparseUpsampleFunction(torch.autograd.Function):
 
         grad_input_feats = torch.zeros((N_IN, C), device=grad_output.device, dtype=grad_output.dtype)
         grad_input_coords = None
+        grid = lambda meta: (triton.cdiv(N_IN, meta['BLOCK_SIZE_N']), )
+        BLOCK_SIZE_C = 64
+        if C < 64: BLOCK_SIZE_C = triton.next_power_of_2(C)
+        SparseUpsampleFunction._sparse_upsample_backward_kernel[grid](
+            grad_out_feats_ptr=grad_output,
+            grad_in_feats_ptr=grad_input_feats,
+            scale_factor=scale_factor,
+            N_OUT=N_OUT, N_IN=N_IN, C=C, 
+            BLOCK_SIZE_C=BLOCK_SIZE_C
+        )
 
         return grad_input_feats, None, None, None
 
@@ -258,7 +369,7 @@ def sparse_upsample(input: SparseTensor, size=None, scale_factor=None) -> Sparse
     """
     output_feats, output_coords, new_spatial_shape = SparseUpsampleFunction.apply(input.F, input.C, input.spatial_shape, scale_factor)
     return SparseTensor(
-        output_feats, output_coords, new_spatial_shape
+        output_feats, output_coords, new_spatial_shape, batch_size=input.batch_size
     )
 
 # --- Sparse Downsample ---
@@ -329,4 +440,3 @@ class SparseDownsampleFunction(torch.autograd.Function):
     
 def sparse_downsample():
     raise NotImplementedError
-

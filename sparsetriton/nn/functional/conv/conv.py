@@ -68,7 +68,7 @@ def sparse_conv3d(
     assert K == k_size**3, f"Kernel size in weight({K}) and argument({k_size**3}) must match"
 
     if transposed and stride > 1:
-        in_hash_table = HashTable(tensor.C.shape[0] * get_h_table_f(), device=device)
+        in_hash_table = HashTable(int(tensor.C.shape[0] * get_h_table_f()), device=device)
         key_coords = tensor.C.clone()
         key_coords[:, 1:] *= s
         in_hash_table.insert(key_coords)
@@ -76,7 +76,7 @@ def sparse_conv3d(
         if tensor._cache.hashtable is not None:
             in_hash_table = tensor._cache.hashtable
         else:
-            in_hash_table = HashTable(tensor.C.shape[0] * get_h_table_f(), device=device)
+            in_hash_table = HashTable(int(tensor.C.shape[0] * get_h_table_f()), device=device)
             in_hash_table.insert(tensor.C)
             tensor._cache.hashtable = in_hash_table
         
