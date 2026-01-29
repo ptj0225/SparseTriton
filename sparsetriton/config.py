@@ -8,8 +8,8 @@ class ConvAlgo(Enum):
 _STATE = {
     "coords_dtype": torch.int16,
     "algo": ConvAlgo.ImplicitHashFlyGEMM,
-    "h_tbl_factor": 2.0,
-    "h_tbl_max_probe_n": 32
+    "h_tbl_factor": 2,
+    "h_tbl_max_probe_n": 64
 }
 
 def set_coords_dtype(dtype: torch.dtype):

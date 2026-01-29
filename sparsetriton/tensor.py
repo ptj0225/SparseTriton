@@ -35,7 +35,7 @@ class SparseTensor:
         if batch_size is None:
             self.batch_size = int(self.coords[:, 0].max().item() + 1) if self.coords.shape[0] > 0 else 0
         else:
-            assert self.coords.shape[0] == 0 or batch_size > self.coords[:, 0].max().item()
+            assert batch_size > self.coords[:, 0].max().item()
             self.batch_size = batch_size
 
         self._cache = TensorCache() if cache is None else cache

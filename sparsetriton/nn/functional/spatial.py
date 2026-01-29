@@ -18,7 +18,7 @@ class SparsePoolingFunction(torch.autograd.Function):
     @triton.jit
     def _sparse_pooling_forward_kernel(
         in_feats_ptr, out_feats_ptr,
-        map_ptr, count_ptr,
+        map_ptr,
         N_IN, C,
         MODE: tl.constexpr, # 0: max, 1: avg
         BLOCK_SIZE: tl.constexpr,
@@ -48,24 +48,27 @@ class SparsePoolingFunction(torch.autograd.Function):
                 tl.atomic_add(target_ptr, val, mask=op_mask)
 
     @staticmethod
-    def forward(ctx, feats, coords, spatial_shape, batch_size, kernel_size, stride, padding, mode='max'):
+    def forward(ctx, in_feats, in_coords, spatial_shape, kernel_size, stride, padding, mode='max'):
+
+        new_spatial_shape = tuple((s + 2*padding - kernel_size)//stride + 1 for s in spatial_shape)
+
         if stride is None:
             stride = kernel_size
             
         # coords = input_tensor.C
-        device = coords.device
+        device = in_coords.device
         
         # Map inputs to outputs (Downsampling logic)
-        spatial_coords = coords[:, 1:]
+        spatial_coords = in_coords[:, 1:]
         out_spatial = (spatial_coords + padding) // stride
-        out_coords_full = torch.cat([coords[:, :1], out_spatial], dim=1)
+        out_coords_full = torch.cat([in_coords[:, :1], out_spatial], dim=1)
         flat_coords = flatten_coord(out_coords_full)
         unique_flat, inverse_indices = torch.unique(flat_coords, sorted=True, return_inverse=True)
         unique_coords = unflatten_coord(unique_flat)
         
-        N_IN, C = feats.shape
+        N_IN, C = in_feats.shape
         N_OUT = unique_coords.shape[0]
-        out_feats = torch.empty((N_OUT, C), device=device, dtype=feats.dtype)
+        out_feats = torch.empty((N_OUT, C), device=device, dtype=in_feats.dtype)
 
         mode_const = 0
         if mode == 'max':
@@ -77,36 +80,25 @@ class SparsePoolingFunction(torch.autograd.Function):
         else:
             raise ValueError(f"Unsupported mode: {mode}")
             
-        # Optimization: Use torch.bincount instead of atomic_add in kernel
-        if mode == 'avg':
-            count = torch.bincount(inverse_indices, minlength=N_OUT).to(feats.dtype).view(-1, 1).clamp(min=1)
-        else:
-            count = None
         
         grid = lambda meta: (triton.cdiv(N_IN, meta['BLOCK_SIZE']), )
         BLOCK_C = 64
         if C < 64: BLOCK_C = triton.next_power_of_2(C)
         
         SparsePoolingFunction._sparse_pooling_forward_kernel[grid](
-            in_feats_ptr=feats,
+            in_feats_ptr=in_feats,
             out_feats_ptr=out_feats,
             map_ptr=inverse_indices,
-            count_ptr=count if count is not None else inverse_indices,
             N_IN=N_IN, C=C,
             MODE=mode_const,
             BLOCK_C=BLOCK_C
         )
         
         if mode == 'avg':
-            out_feats = out_feats / count
-            
-        ctx.save_for_backward(feats, coords, inverse_indices, out_feats, count)
-        ctx.mode = mode
-        ctx.N_IN = N_IN
+            count = torch.bincount(inverse_indices, minlength=N_OUT).to(in_feats.dtype).view(-1, 1).clamp(min=1)
+            out_feats /= count
         
-        new_spatial_shape = tuple((s + 2*padding - kernel_size)//stride + 1 for s in spatial_shape)
-        
-        return out_feats, unique_coords, new_spatial_shape, batch_size
+        return out_feats, unique_coords, new_spatial_shape
 
     @staticmethod
     @triton.autotune(
@@ -162,7 +154,10 @@ class SparsePoolingFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out_feats, grad_out_coords, grad_spatial_shape, grad_batch_size):
+        grad_out_feats = grad_out_feats.contiguous()
         in_feats, in_coords, map_tensor, out_feats, count = ctx.saved_tensors
+        in_feats =in_feats.contiguous()
+        out_feats = out_feats.contiguous()
         mode = ctx.mode
         N_IN = ctx.N_IN
         C = in_feats.shape[1]
@@ -190,12 +185,11 @@ class SparsePoolingFunction(torch.autograd.Function):
         return grad_in, None, None, None, None, None, None, None
 
 
-def sparse_pooling(input: SparseTensor, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False, mode='max') -> SparseTensor:
-    out_feats, out_coords, new_spatial_shape, batch_size = SparsePoolingFunction.apply(
-        input.F, input.C, input.spatial_shape, input.batch_size,
-        kernel_size, stride, padding, mode
+def sparse_pooling(input: SparseTensor, kernel_size, stride, padding, mode) -> SparseTensor:
+    out_feats, out_coords, new_spatial_shape = SparsePoolingFunction.apply(
+        input.F, input.C, input.spatial_shape, kernel_size, stride, padding, mode
     )
-    return SparseTensor(out_feats, out_coords, spatial_shape=new_spatial_shape, batch_size=batch_size)
+    return SparseTensor(out_feats, out_coords, spatial_shape=new_spatial_shape, batch_size=input.batch_size)
 
 # --- Sparse Upsample ---
 class SparseUpsampleFunction(torch.autograd.Function):

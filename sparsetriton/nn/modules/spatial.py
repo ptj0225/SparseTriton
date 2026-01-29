@@ -1,24 +1,22 @@
+from re import S
 import torch.nn as nn
 from sparsetriton import SparseTensor
 from sparsetriton.nn.functional import sparse_pooling, sparse_upsample, sparse_downsample
+from typing import *
 
 class SparsePooling(nn.Module):
     """
     Placeholder for sparse pooling module.
     """
-    def __init__(self, kernel_size, mode, stride=None, padding=0, dilation=1, ceil_mode=False, return_indices=False):
+    def __init__(self, kernel_size:int, mode: Literal["avg", "max"] = "avg", stride:int=None, padding=0):
         super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
-        self.dilation = dilation
-        self.ceil_mode = ceil_mode
-        self.return_indices = return_indices
-        self.mode = kernel_size
-        # TODO: Initialize any parameters if needed
+        self.mode = mode
 
-    def forward(self, input: SparseTensor):
-        return sparse_pooling(input, self.kernel_size, self.stride, self.padding, self.dilation, self.ceil_mode, self.return_indices)
+    def forward(self, x: SparseTensor) -> SparseTensor:
+        return sparse_pooling(x, self.kernel_size, self.stride, self.padding, self.mode)
 
 class SparseUpsample(nn.Module):
     """
