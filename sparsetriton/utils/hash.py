@@ -92,7 +92,7 @@ def flatten_coords_kernel(b, x, y, z):
         triton.Config({'BLOCK_SIZE': 512}, num_warps=8),
         triton.Config({'BLOCK_SIZE': 1024}, num_warps=8),
     ],
-    key=['N'],
+    key=['tune_N'],
 )
 @triton.jit
 def build_hash_table_kernel(
