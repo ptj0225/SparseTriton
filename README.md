@@ -9,6 +9,11 @@ A high-performance, **hardware-agnostic** 3D Sparse Convolution library implemen
 
 ---
 
+## 🚧 Work in Progress
+This project is currently under active development. While core functionalities are implemented, some features may be unstable, undocumented, or subject to change. Performance optimizations and comprehensive testing are ongoing. Your contributions and feedback are highly welcome!
+
+---
+
 ## 🚀 Features
 * **Submanifold Sparse Convolution**: Preserves input sparsity patterns for deep architectures.
 * **Standard Sparse Convolution**: Supports stride and padding for downsampling.
@@ -27,13 +32,3 @@ A high-performance, **hardware-agnostic** 3D Sparse Convolution library implemen
     * **Gather**: Collect features based on the rulebook.
     * **GEMM**: Perform matrix multiplication using Triton's fused kernels.
     * **Scatter**: Distribute results back to the output sparse tensor.
-
----
-
-## 📦 Installation
-
-```bash
-# Requirements: Python 3.9+, PyTorch 2.1+, Triton 2.1+
-git clone [https://github.com/your-repo/triton-3d-sparse-conv.git](https://github.com/your-repo/triton-3d-sparse-conv.git)
-cd triton-3d-sparse-conv
-pip install -e .
