@@ -122,7 +122,7 @@ def build_hash_table_kernel(
     y = tl.load(coords_ptr + coords_base_idx + 2, mask=mask)
     z = tl.load(coords_ptr + coords_base_idx + 3, mask=mask)
 
-    hash_val = hash_coords_kernel(b, x, y, z)
+    hashes = hash_coords_kernel(b, x, y, z)
     keys = hash_coords_kernel2(b, x, y, z)
 
     active_mask = mask 
@@ -130,9 +130,9 @@ def build_hash_table_kernel(
     probe_step = 0
     while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < max_probe_step):
         # 활성화된 스레드만 해시 계산 및 atomic 연산 수행
-        curr_hash = (hash_val + 1000003 * probe_step) % table_size
-        
-        curr_hash = tl.where(active_mask, curr_hash, hash_val % table_size)
+        curr_hash = (hashes + 83492791 * (probe_step // 4) + probe_step).to(tl.uint32)
+        curr_hash %= tl.cast(table_size, tl.uint32)
+        curr_hash = tl.where(active_mask, curr_hash, hashes % table_size)
         compare_vals = tl.where(active_mask, -1, -2)
         old_key = tl.atomic_cas(hash_keys_ptr + curr_hash, compare_vals, keys)
         
@@ -162,7 +162,7 @@ def query_hash_table_impl(
     probe_step = 0
     result = tl.full((BLOCK_SIZE,), -1, dtype=tl.int32)
     while (tl.max(active_mask.to(tl.int1), axis=0) > 0) & (probe_step < max_probe_step):
-        curr_hash = (hashes + 1000003 * probe_step) % table_size
+        curr_hash = (hashes + 83492791 * (probe_step // 4) + probe_step).to(tl.uint32) % tl.cast(table_size, tl.uint32)
         loaded_key = tl.load(table_keys_ptr + curr_hash, mask=active_mask, other=-1)
         found_mask = active_mask & (loaded_key == keys)
         empty_mask = loaded_key == -1
@@ -181,7 +181,7 @@ def query_hash_table_impl(
         triton.Config({'BLOCK_SIZE': 1024}, num_warps=8),
         triton.Config({'BLOCK_SIZE': 2048}, num_warps=8),
     ],
-    key=['N'],
+    key=['tune_N'],
 )
 @triton.jit
 def query_hash_table_kernel(
@@ -191,6 +191,7 @@ def query_hash_table_kernel(
     table_values_ptr,
     table_size,
     N,
+    tune_N,
     BLOCK_SIZE: tl.constexpr,
     max_probe_step: tl.constexpr = get_h_table_max_p(),
 ):
@@ -239,7 +240,7 @@ def query_hash_table_kernel(
         triton.Config({'BLOCK_SIZE': 512}, num_warps=8),
         triton.Config({'BLOCK_SIZE': 1024}, num_warps=8),
     ],
-    key=['N'],
+    key=['tune_N'],
 )
 @triton.jit
 def coalesce_coords_kernel(
@@ -248,6 +249,7 @@ def coalesce_coords_kernel(
     hash_keys_ptr, # (2 * N)
     table_size, 
     N,
+    tune_N,
     BLOCK_SIZE: tl.constexpr
 ):
     pid = tl.program_id(0)
@@ -288,7 +290,8 @@ def coalesce_coords(coords: torch.Tensor):
         valids,
         hash_keys,
         table_size,
-        N
+        N,
+        triton.next_power_of_2(N)
     )
     return valids
 
@@ -347,7 +350,8 @@ class HashTable:
         
         query_hash_table_kernel[grid](
             keys, out_values, self.table_keys, self.table_values, 
-            self.capacity, N, max_probe_step = get_h_table_max_p()
+            self.capacity, N, triton.next_power_of_2(N),
+            max_probe_step = get_h_table_max_p()
         )
         return out_values
     

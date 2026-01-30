@@ -5,13 +5,12 @@ from sparsetriton.utils.hash import query_hash_table_impl, hash_coords_kernel, h
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 64}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 32}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 32}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 32}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 64}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_OUT': 64, 'BLOCK_SIZE_C_IN': 32}, num_warps=8)
     ],
     key=['C_in', 'C_out'],
-    cache_results=True,
 )
 @triton.jit
 def implicit_gemm_hash_on_fly_fwd_kernel(

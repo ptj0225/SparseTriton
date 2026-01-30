@@ -28,9 +28,9 @@ def create_random_coords(num_keys, spatial_dim, batch_size, device='cuda'):
     # If not enough unique coords, take what we have
     if unique_coords.shape[0] < num_keys:
         print(f"Warning: Could only generate {unique_coords.shape[0]} unique coordinates.")
-        return unique_coords.to(torch.int32)
+        return unique_coords.to(torch.int16)
 
-    return unique_coords[:num_keys].to(torch.int32)
+    return unique_coords[:num_keys].to(torch.int16)
 
 
 def benchmark_hash_table(num_keys, capacity, spatial_dim, batch_size, warmup_runs=3, bench_runs=100):
@@ -105,10 +105,11 @@ def benchmark_hash_table(num_keys, capacity, spatial_dim, batch_size, warmup_run
 
 if __name__ == '__main__':
     # Configuration
-    NUM_KEYS = 100_000
+    NUM_KEYS = 134217728 // 2
+    # NUM_KEYS = 134217728
     CAPACITY = int(NUM_KEYS * get_h_table_f())
-    SPATIAL_DIM = 369
-    BATCH_SIZE = 16
+    SPATIAL_DIM = 512
+    BATCH_SIZE = 1
 
     benchmark_hash_table(
         num_keys=NUM_KEYS,

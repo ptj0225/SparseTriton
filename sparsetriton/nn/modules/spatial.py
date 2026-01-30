@@ -8,42 +8,40 @@ class SparsePooling(nn.Module):
     """
     Placeholder for sparse pooling module.
     """
-    def __init__(self, kernel_size:int, mode: Literal["avg", "max"] = "avg", stride:int=None, padding=0):
+    def __init__(self, kernel_size:int, mode: Literal["avg", "max"] = "avg", stride:int=1, padding:int = 0):
         super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride
-        self.padding = padding
         self.mode = mode
+        self.padding = padding
 
     def forward(self, x: SparseTensor) -> SparseTensor:
-        return sparse_pooling(x, self.kernel_size, self.stride, self.padding, self.mode)
+        return sparse_pooling(x, self.kernel_size, self.padding ,self.stride, self.mode)
 
 class SparseUpsample(nn.Module):
     """
     Placeholder for sparse upsample module.
     """
-    def __init__(self, size=None, scale_factor=None, mode='nearest', align_corners=None):
+    def __init__(self, size=None, scale_factor=None, align_corners=None):
         super().__init__()
         self.size = size
         self.scale_factor = scale_factor
-        self.mode = mode
         self.align_corners = align_corners
         # TODO: Initialize any parameters if needed
 
     def forward(self, input: SparseTensor):
-        return sparse_upsample(input, self.size, self.scale_factor, self.mode, self.align_corners)
+        return sparse_upsample(input, self.size, self.scale_factor)
 
-class SparseDownsample(nn.Module):
+class SparseDownsample(nn.Module): 
     """
     Placeholder for sparse downsample module.
     """
-    def __init__(self, size=None, scale_factor=None, mode='nearest', align_corners=None):
+    def __init__(self, size=None, scale_factor=None, align_corners=None):
         super().__init__()
         self.size = size
         self.scale_factor = scale_factor
-        self.mode = mode
         self.align_corners = align_corners
         # TODO: Initialize any parameters if needed
 
     def forward(self, input: SparseTensor):
-        return sparse_downsample(input, self.size, self.scale_factor, self.mode, self.align_corners)
+        return sparse_downsample(input, self.scale_factor)
