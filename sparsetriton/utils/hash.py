@@ -98,6 +98,7 @@ def flatten_coords_kernel(b, x, y, z):
 def build_hash_table_kernel(
     coords_ptr, hash_keys_ptr, hash_vals_ptr,
     table_size, N,
+    tune_N,
     BLOCK_SIZE: tl.constexpr,
     max_probe_step: tl.constexpr=get_h_table_max_p(),
 ):
@@ -339,6 +340,7 @@ class HashTable:
             self.table_values, # hash_vals_ptr
             self.capacity,     # table_size
             N,                 # N
+            triton.next_power_of_2(N),
             max_probe_step = get_h_table_max_p()
         )
 
