@@ -27,6 +27,10 @@ class SparseTensor:
     ) -> None:
         self.feats = feats
         self.coords = coords.to(device=feats.device, dtype=get_coords_dtype())
+        assert self.feats.shape[0] == self.coords.shape[0], "The number of features and coordinates must match."
+        assert self.coords.shape[1] == 4, "Coordinates must have shape (N, 4)."
+        assert self.feats.ndim == 2 and self.coords.ndim == 2, "Features and coordinates must be 2D tensors."
+        
         if spatial_shape is None:
             self.spatial_shape = torch.Size(self.coords[:, 1:].max(dim=0).values + 1) if self.coords.shape[0] > 0 else torch.Size([0, 0, 0])
         else:

@@ -100,7 +100,7 @@ def build_hash_table_kernel(
     table_size, N,
     tune_N,
     BLOCK_SIZE: tl.constexpr,
-    max_probe_step: tl.constexpr=get_h_table_max_p(),
+    max_probe_step: tl.constexpr=128,
 ):
     """
     Builds a hash table mapping packed coordinates to voxel indices.
@@ -157,7 +157,7 @@ def query_hash_table_impl(
     idx,
     N,
     BLOCK_SIZE,
-    max_probe_step: tl.constexpr = get_h_table_max_p()
+    max_probe_step: tl.constexpr = 128
 ):
     active_mask = idx < N 
     probe_step = 0
@@ -194,7 +194,7 @@ def query_hash_table_kernel(
     N,
     tune_N,
     BLOCK_SIZE: tl.constexpr,
-    max_probe_step: tl.constexpr = get_h_table_max_p(),
+    max_probe_step: tl.constexpr = 128,
 ):
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -341,7 +341,6 @@ class HashTable:
             self.capacity,     # table_size
             N,                 # N
             triton.next_power_of_2(N),
-            max_probe_step = get_h_table_max_p()
         )
 
     def query(self, keys: torch.Tensor) -> torch.Tensor:
@@ -353,7 +352,6 @@ class HashTable:
         query_hash_table_kernel[grid](
             keys, out_values, self.table_keys, self.table_values, 
             self.capacity, N, triton.next_power_of_2(N),
-            max_probe_step = get_h_table_max_p()
         )
         return out_values
     

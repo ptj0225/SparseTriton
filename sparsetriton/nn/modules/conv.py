@@ -19,7 +19,7 @@ class Conv3d(nn.Module):
         out_channels: int,
         kernel_size: Union[int, Tuple[int, int, int]] = 3,
         stride: Union[int, Tuple[int, int, int]] = 1,
-        padding: Union[int, Tuple[int, int, int]] = 1,
+        padding: Union[int, Tuple[int, int, int]] = 0,
         dilation: Union[int, Tuple[int, int, int]] = 1,
         subm: bool = True,
         bias: bool = True,

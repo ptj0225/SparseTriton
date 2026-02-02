@@ -9,7 +9,6 @@ _STATE = {
     "coords_dtype": torch.int16,
     "algo": ConvAlgo.ImplicitHashFlyGEMM,
     "h_tbl_factor": 1.5,
-    "h_tbl_max_probe_n": 128
 }
 
 def set_coords_dtype(dtype: torch.dtype):

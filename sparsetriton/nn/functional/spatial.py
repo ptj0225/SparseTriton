@@ -364,7 +364,7 @@ class SparseUpsampleFunction(torch.autograd.Function):
         return grad_input_feats, None, None, None
 
 
-def sparse_upsample(input: SparseTensor, size=None, scale_factor=None) -> SparseTensor:
+def sparse_upsample(input: SparseTensor, scale_factor=None) -> SparseTensor:
     """
     Placeholder for sparse upsample operation.
     """
@@ -372,12 +372,3 @@ def sparse_upsample(input: SparseTensor, size=None, scale_factor=None) -> Sparse
     return SparseTensor(
         output_feats, output_coords, new_spatial_shape, batch_size=input.batch_size
     )
-
-# --- Sparse Downsample ---
-def sparse_downsample(input: SparseTensor, factor: int) -> SparseTensor:
-    """
-    Downsample the sparse tensor by a given factor using average pooling.
-    """
-    if factor is None or factor == 1:
-        return input
-    return sparse_pooling(input, kernel_size=factor, stride=factor, padding=factor // 2, mode='avg')

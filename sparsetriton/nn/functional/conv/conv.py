@@ -58,8 +58,6 @@ def sparse_conv3d(
     
     if submanifold:
         assert not transposed, "Submanifold convolution does not support transposed=True"
-        assert s == 1, f"Submanifold convolution only supports stride=1 not {s}"
-        p = 0
 
     device = tensor.F.device
     
@@ -126,12 +124,12 @@ def sparse_conv3d(
 
     if bias is not None:
         out_feats += bias
-    if submanifold:
+    if torch.equal(out_coords, tensor.C):
         return tensor.replace(out_feats)
-    else:
-        return SparseTensor(
-            feats=out_feats,
-            coords=out_coords,
-            spatial_shape=new_spatial_shape,
-            batch_size=tensor.batch_size,
-        )
+
+    return SparseTensor(
+        feats=out_feats,
+        coords=out_coords,
+        spatial_shape=new_spatial_shape,
+        batch_size=tensor.batch_size,
+    )

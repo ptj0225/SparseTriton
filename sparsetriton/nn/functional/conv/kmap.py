@@ -37,20 +37,20 @@ def expand_coords_kernel(
 
     b_val = tl.load(in_ptr + n_idx * stride_in_n, mask=mask)
 
-    x_in = tl.load(in_ptr + n_idx * stride_in_n + 1, mask=mask)
-    x_off = tl.load(offsets_ptr + k_idx * stride_off_k + 0, mask=mask)
+    x_in = tl.load(in_ptr + n_idx * stride_in_n + 1 * stride_in_c, mask=mask)
+    x_off = tl.load(offsets_ptr + k_idx * stride_off_k, mask=mask)
     
-    y_in = tl.load(in_ptr + n_idx * stride_in_n + 2, mask=mask)
-    y_off = tl.load(offsets_ptr + k_idx * stride_off_k + 1, mask=mask)
+    y_in = tl.load(in_ptr + n_idx * stride_in_n + 2 * stride_in_c, mask=mask)
+    y_off = tl.load(offsets_ptr + k_idx * stride_off_k + stride_off_c, mask=mask)
 
-    z_in = tl.load(in_ptr + n_idx * stride_in_n + 3, mask=mask)
-    z_off = tl.load(offsets_ptr + k_idx * stride_off_k + 2, mask=mask)
+    z_in = tl.load(in_ptr + n_idx * stride_in_n + 3 * stride_in_c, mask=mask)
+    z_off = tl.load(offsets_ptr + k_idx * stride_off_k + 2 * stride_off_c, mask=mask)
 
     out_row_ptr = out_ptr + offs * stride_out_nk
-    tl.store(out_row_ptr + 0, b_val, mask=mask)
-    tl.store(out_row_ptr + 1, x_in + x_off, mask=mask)
-    tl.store(out_row_ptr + 2, y_in + y_off, mask=mask)
-    tl.store(out_row_ptr + 3, z_in + z_off, mask=mask)
+    tl.store(out_row_ptr, b_val, mask=mask)
+    tl.store(out_row_ptr + stride_out_c, x_in + x_off, mask=mask)
+    tl.store(out_row_ptr + 2 * stride_out_c, y_in + y_off, mask=mask)
+    tl.store(out_row_ptr + 3 * stride_out_c, z_in + z_off, mask=mask)
 
 @triton.jit
 def filter_unique_kernel(
@@ -137,7 +137,8 @@ def build_out_coords(
     dilation: int = 1,
     padding: int = 1,
     transposed: bool = False,
-    submanifold: bool = True
+    submanifold: bool = True,
+    chunk_size:int = None
 ) -> torch.Tensor:
     """
     Builds output coordinates for sparse convolution.
@@ -159,9 +160,11 @@ def build_out_coords(
     st = torch.tensor([stride] * 3, device=device)
 
     K_N = int(torch.prod(ks).item())
+    if chunk_size is None:
+        chunk_size = K_N
     kernel_offsets = build_kernel_offsets(ks, dil, pad, device, in_coords.dtype, transposed=transposed)
-    if submanifold:
-        return in_coords, spatial_shape, kernel_offsets
+    # if submanifold:
+    #     return in_coords, spatial_shape, kernel_offsets
     if not transposed:
         new_spatial_shape = torch.tensor([(s - (k - 1) * d + 2*p - 1) // st + 1
                                         for s, k, d, p, st in zip(spatial_shape, ks, dil, pad, [stride]*3)], 
@@ -175,20 +178,30 @@ def build_out_coords(
     hash_table_size = N * K_N * 2
     global_hash_keys = torch.full((hash_table_size,), -1, dtype=torch.int32, device=device)
     
-    CHUNK_SIZE = 1
     if transposed and stride > 1:
         src_coords = in_coords.clone()
         src_coords[:, 1:] *= stride
     else:
         src_coords = in_coords
-    
-    for i in range(0, K_N, CHUNK_SIZE):
-        curr_offsets = kernel_offsets[i : i + CHUNK_SIZE]
+
+
+    if submanifold:
+        target_offsets = pad - (ks - 1) * dil // 2
+        target_offsets = target_offsets.unsqueeze(0)
+        hash_table_size = N * 2
+    else:
+        target_offsets = kernel_offsets
+        hash_table_size = N * K_N * 2
+
+    global_hash_keys = torch.full((hash_table_size,), -1, dtype=torch.int32, device=device)
+    for i in range(0, len(target_offsets), chunk_size):
+        curr_offsets = target_offsets[i : i + chunk_size]
         curr_K = curr_offsets.shape[0]
         
         # 1. 현재 청크만큼만 좌표 확장 (N * CHUNK_SIZE)
         chunk_out = torch.empty((N * curr_K, 4), dtype=in_coords.dtype, device=device)
         grid = lambda meta: (triton.cdiv(N * curr_K, meta['BLOCK_SIZE']), )
+        
         expand_coords_kernel[grid](
             src_coords,
             curr_offsets, chunk_out,
@@ -197,7 +210,7 @@ def build_out_coords(
             curr_offsets.stride(0), curr_offsets.stride(1),
             chunk_out.stride(0), chunk_out.stride(1)
         )
-        # 2. 스트라이드 필터링 및 다운샘플링
+
         if not transposed:
             if stride > 1:
                 mask_st = torch.all(chunk_out[:, 1:] % stride == 0, dim=1)
@@ -214,7 +227,6 @@ def build_out_coords(
         chunk_out = chunk_out[mask_range]
         
         if chunk_out.shape[0] > 0:
-            # 전역 해시 테이블을 사용하여 이전에 발견되지 않은 새로운 좌표만 필터링
             num_chunk = chunk_out.shape[0]
             is_unique_mask = torch.empty((num_chunk,), dtype=torch.bool, device=device)
             grid_filter = lambda meta: (triton.cdiv(num_chunk, meta['BLOCK_SIZE']), )

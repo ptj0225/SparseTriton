@@ -22,6 +22,7 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
     N, C_in, C_out,
     BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_C_OUT: tl.constexpr,
     BLOCK_SIZE_C_IN: tl.constexpr, K_VOL: tl.constexpr,
+    max_probe_step: tl.constexpr = 128
 ):
     """
     Sparse Convolution Forward Kernel (Implicit GEMM with On-the-fly Hash Lookup)
@@ -87,7 +88,7 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
                 other=0.0
             )  # (BLOCK_SIZE_C_IN, BLOCK_SIZE_C_OUT)
 
-            acc = tl.dot(f_tile, w_tile, acc=acc, allow_tf32=False)
+            acc = tl.dot(f_tile, w_tile, acc=acc)
 
     out_off = off_n[:, None] * C_out + off_cout[None, :]  # (BLOCK_SIZE_N, BLOCK_SIZE_C_OUT)
     tl.store(out_ptr + out_off, acc.to(out_ptr.dtype.element_ty), mask=mask_n[:, None] & mask_cout[None, :])
@@ -177,10 +178,7 @@ def implicit_gemm_bwd_feat_kernel(
                 mask=mask_cin[:, None] & mask_cout[None, :],
                 other=0.0
             )  
-            acc = tl.dot(do_tile, tl.trans(w_tile), acc=acc, allow_tf32=False)
-            # (BLOCK_SIZE_C_IN, BLOCK_SIZE_C_OUT) -> Transpose to (BLOCK_SIZE_C_OUT, BLOCK_SIZE_C_IN)
-            # w_tile = tl.load(weights_ptr + (k * C_in * C_out) + (off_cin[None, :] + off_cout[:, None] * C_in), mask=mask_cin[None, :] & mask_cout[:, None], other=0.0)
-            # acc = tl.dot(do_tile, w_tile, acc=acc, allow_tf32=False)
+            acc = tl.dot(do_tile, tl.trans(w_tile), acc=acc)
             
         target_ptrs = d_features_ptr + in_indices[:, None] * C_in + off_cin[None, :]  # (BLOCK_SIZE_N, BLOCK_SIZE_C_IN)
         tl.atomic_add(target_ptrs, acc.to(d_out_ptr.dtype.element_ty), mask=valid_mask[:, None] & mask_cin[None, :])
@@ -272,7 +270,7 @@ def implicit_gemm_bwd_weight_kernel(
         other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_C_OUT)
     
-    acc = tl.dot(tl.trans(f_tile), do_tile, allow_tf32=False)
+    acc = tl.dot(tl.trans(f_tile), do_tile)
     
     w_offset = (pid_k * C_in * C_out) + (off_cin[:, None] * C_out + off_cout[None, :])  # (BLOCK_SIZE_C_IN, BLOCK_SIZE_C_OUT)
     tl.atomic_add(d_weights_ptr + w_offset, acc.to(d_weights_ptr.dtype.element_ty), mask=mask_cin[:, None] & mask_cout[None, :])

@@ -1,7 +1,8 @@
+from ast import mod
 from re import S
 import torch.nn as nn
 from sparsetriton import SparseTensor
-from sparsetriton.nn.functional import sparse_pooling, sparse_upsample, sparse_downsample
+from sparsetriton.nn.functional import sparse_pooling, sparse_upsample
 from typing import *
 
 class SparsePooling(nn.Module):
@@ -15,6 +16,7 @@ class SparsePooling(nn.Module):
         self.mode = mode
         self.padding = padding
 
+
     def forward(self, x: SparseTensor) -> SparseTensor:
         return sparse_pooling(x, self.kernel_size, self.padding ,self.stride, self.mode)
 
@@ -22,26 +24,20 @@ class SparseUpsample(nn.Module):
     """
     Placeholder for sparse upsample module.
     """
-    def __init__(self, size=None, scale_factor=None, align_corners=None):
+    def __init__(self, scale_factor=None):
         super().__init__()
-        self.size = size
         self.scale_factor = scale_factor
-        self.align_corners = align_corners
-        # TODO: Initialize any parameters if needed
 
     def forward(self, input: SparseTensor):
-        return sparse_upsample(input, self.size, self.scale_factor)
+        return sparse_upsample(input, self.scale_factor)
 
-class SparseDownsample(nn.Module): 
+class SparseDownsample(SparsePooling): 
     """
     Placeholder for sparse downsample module.
     """
-    def __init__(self, size=None, scale_factor=None, align_corners=None):
-        super().__init__()
-        self.size = size
-        self.scale_factor = scale_factor
-        self.align_corners = align_corners
-        # TODO: Initialize any parameters if needed
-
+    def __init__(self, scale_factor=None, mode=Literal['max', 'avg']):
+        super().__init__(kernel_size=scale_factor, stride=scale_factor, mode=mode, padding=0)
+    
     def forward(self, input: SparseTensor):
-        return sparse_downsample(input, self.scale_factor)
+        return super().forward(input)
+
