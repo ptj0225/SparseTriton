@@ -101,7 +101,6 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
         triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=8, num_stages=3),
     ],
     key=['C_in', 'C_out'],
-    cache_results=True,
 )
 @triton.jit
 def implicit_gemm_bwd_feat_kernel(
@@ -191,7 +190,6 @@ def implicit_gemm_bwd_feat_kernel(
         triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=8, num_stages=3),
     ],
     key=['C_in', 'C_out'],
-    cache_results=True,
 )
 @triton.jit
 def implicit_gemm_bwd_weight_kernel(
