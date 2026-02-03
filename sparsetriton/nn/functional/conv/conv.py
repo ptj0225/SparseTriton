@@ -60,12 +60,12 @@ def sparse_conv3d(
         assert not transposed, "Submanifold convolution does not support transposed=True"
 
     device = tensor.F.device
-    
     K, C_in, C_out = weight.shape
+    
     assert C_in == tensor.F.shape[1], f"Input channels in weight({C_in}) and tensor({tensor.F.shape[1]}) must match"
     assert K == k_size**3, f"Kernel size in weight({K}) and argument({k_size**3}) must match"
 
-    if transposed and stride > 1:
+    if transposed and s > 1:
         in_hash_table = HashTable(int(tensor.C.shape[0] * get_h_table_f()), device=device)
         key_coords = tensor.C.clone()
         key_coords[:, 1:] *= s
@@ -124,8 +124,10 @@ def sparse_conv3d(
 
     if bias is not None:
         out_feats += bias
-    if torch.equal(out_coords, tensor.C):
-        return tensor.replace(out_feats)
+
+    if submanifold:
+        if out_coords.shape == tensor.C.shape and torch.equal(out_coords, tensor.C):
+            return tensor.replace(out_feats)
 
     return SparseTensor(
         feats=out_feats,

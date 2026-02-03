@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from sparsetriton.utils.hash import hash_coords_kernel, hash_coords_kernel2, flatten_coords_kernel, HashTable, coalesce_coords, hash_coords
+from sparsetriton.utils.hash import hash_coords_kernel, hash_coords_kernel2, get_probe_offsets_impl
 from sparsetriton.utils import mask_spatial_range
 from typing import *
 
@@ -82,7 +82,9 @@ def filter_unique_kernel(
     active = mask
     step = 0
     while (tl.max(active.to(tl.int32), axis=0) > 0) & (step < 1024):
-        curr_h = (h + step) % table_size
+        curr_h = get_probe_offsets_impl(
+            h, step, table_size
+        )
         cmp_val = tl.where(active, tl.cast(-1, tl.int32), tl.cast(-2, tl.int32))
         old = tl.atomic_cas(hash_keys_ptr + curr_h, cmp_val, k)
         

@@ -14,7 +14,7 @@ class SparsePoolingFunction(torch.autograd.Function):
             triton.Config({'BLOCK_SIZE': 128}, num_warps=4),
             triton.Config({'BLOCK_SIZE': 256}, num_warps=8),
         ],
-        key=['C'], # Key for autotuning. N_IN would be number of input non-zero elements.
+        key=['C'],
     )
     @triton.jit
     def _sparse_pooling_forward_kernel(
@@ -208,7 +208,6 @@ class SparseUpsampleFunction(torch.autograd.Function):
             triton.Config({'BLOCK_SIZE': 256}, num_warps=8),
         ],
         key=["scale_factor"],
-        cache_results=True
     )
     @triton.jit
     def _sparse_upsample_forward_kernel(

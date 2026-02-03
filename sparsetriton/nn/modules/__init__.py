@@ -1,4 +1,4 @@
-from .conv import Conv3d
+from .conv import *
 from .activation import *
 from .linear import SparseLinear
 from .norm import *

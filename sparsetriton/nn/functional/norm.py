@@ -17,12 +17,9 @@ def sparse_batch_norm(
     num_channels = feats.shape[-1]
     device = feats.device
 
-    # 1. 배치별 인덱스 추출 (coords의 첫 번째 열)
     batch_idx = coords[:, 0].long()
 
     if training:
-        # 2. 배치별 평균 계산
-        # 각 배치의 채널별 합계 계산
         sum_feats = torch.zeros(batch_size, num_channels, device=device)
         sum_feats.index_add_(0, batch_idx, feats)
         
@@ -42,18 +39,14 @@ def sparse_batch_norm(
         if running_var is not None:
             running_var.copy_((1 - momentum) * running_var + momentum * var.mean(0))
     else:
-        # Inference 시에는 미리 계산된 통계값 사용
         mean = running_mean
         var = running_var
 
-    # 5. 정규화 수행
-    # training/inference 여부에 따라 mean, var의 shape이 다를 수 있으므로 indexing 주의
     curr_mean = mean[batch_idx] if training else mean
     curr_var = var[batch_idx] if training else var
     
     normalized_feats = (feats - curr_mean) / torch.sqrt(curr_var + eps)
 
-    # 6. Weight(Gamma) 및 Bias(Beta) 적용
     if weight is not None:
         normalized_feats *= weight
     if bias is not None:
