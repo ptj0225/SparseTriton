@@ -15,7 +15,7 @@ __all__ = ["get_neighbor_map", "build_out_coords", "build_transposed_out_coords"
         triton.Config({'BLOCK_SIZE': 512}, num_warps=8),
         triton.Config({'BLOCK_SIZE': 1024}, num_warps=8),
     ],
-    key=['K'],
+    key=['tune_N'],
 )
 @triton.jit
 def expand_coords_kernel(
@@ -23,6 +23,7 @@ def expand_coords_kernel(
     offsets_ptr,      # 미리 계산된 오프셋 포인터 (K, 3) - (X, Y, Z)만
     out_ptr,          # 출력 좌표 포인터 (N * K, 4)
     N, K,             # N: 입력 개수, K: 커널 포인트 개수
+    tune_N,
     stride_in_n, stride_in_c,
     stride_off_k, stride_off_c,
     stride_out_nk, stride_out_c,
@@ -163,8 +164,8 @@ def build_out_coords(
     if chunk_size is None:
         chunk_size = K_N
     kernel_offsets = build_kernel_offsets(ks, dil, pad, device, in_coords.dtype, transposed=transposed)
-    # if submanifold:
-    #     return in_coords, spatial_shape, kernel_offsets
+    if submanifold and stride == 1 and ((kernel_size -1) * dilation) // 2 == padding:
+        return in_coords, spatial_shape, kernel_offsets
     if not transposed:
         new_spatial_shape = torch.tensor([(s - (k - 1) * d + 2*p - 1) // st + 1
                                         for s, k, d, p, st in zip(spatial_shape, ks, dil, pad, [stride]*3)], 
@@ -206,6 +207,7 @@ def build_out_coords(
             src_coords,
             curr_offsets, chunk_out,
             N, curr_K,
+            triton.next_power_of_2(N),
             in_coords.stride(0), in_coords.stride(1),
             curr_offsets.stride(0), curr_offsets.stride(1),
             chunk_out.stride(0), chunk_out.stride(1)
