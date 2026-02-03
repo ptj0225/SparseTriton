@@ -21,13 +21,6 @@ dependencies = [
     "torch>=2.1",
     "triton>=2.1",
     "numpy",
-    "backports.cached-property; python_version < '3.8'",
-]
-
-[project.optional-dependencies]
-test = [
-    "pytest",
-    "pytorch-sparsetorch"
 ]
 
 [build-system]
