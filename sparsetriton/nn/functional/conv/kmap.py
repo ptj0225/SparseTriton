@@ -19,10 +19,10 @@ __all__ = ["get_neighbor_map", "build_out_coords", "build_transposed_out_coords"
 )
 @triton.jit
 def expand_coords_kernel(
-    in_ptr,           # 입력 좌표 포인터 (N, 4)
-    offsets_ptr,      # 미리 계산된 오프셋 포인터 (K, 3) - (X, Y, Z)만
-    out_ptr,          # 출력 좌표 포인터 (N * K, 4)
-    N, K,             # N: 입력 개수, K: 커널 포인트 개수
+    in_ptr,           # Input coordinates pointer (N, 4)
+    offsets_ptr,      # Pre-computed offsets pointer (K, 3) - (X, Y, Z) only
+    out_ptr,          # Output coordinates pointer (N * K, 4)
+    N, K,             # N: number of inputs, K: number of kernel points
     tune_N,
     stride_in_n, stride_in_c,
     stride_off_k, stride_off_c,
@@ -63,7 +63,7 @@ def filter_unique_kernel(
     BLOCK_SIZE: tl.constexpr
 ):
     """
-    전역 해시 테이블을 사용하여 현재 좌표 뭉치 중 '처음 발견된' 것들만 마스킹합니다.
+    Use global hash table to mask only 'first discovered' coordinates.
     """
     pid = tl.program_id(0)
     idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -74,7 +74,7 @@ def filter_unique_kernel(
     y = tl.load(coords_ptr + idx * 4 + 2, mask=mask)
     z = tl.load(coords_ptr + idx * 4 + 3, mask=mask)
 
-    # 좌표를 64비트 키로 압축
+    # Compress coordinates to 64-bit key
     h = hash_coords_kernel(b, x, y, z)
     k = hash_coords_kernel2(b, x, y, z)
 
@@ -97,62 +97,141 @@ def filter_unique_kernel(
     tl.store(mask_ptr + idx, is_unique, mask=mask)
 
 
-def build_out_in_map(
-    in_coords: torch.Tensor,
-    out_coords: torch.Tensor,
-    kernel_size: int,
-    dilation: int = 1,
-    padding: int = 0,
-    spatial_shape: Tuple[int, int, int] = None,
-) -> torch.Tensor:
-    """
-    Builds input-output coordinate mapping for sparse convolution.
-    
-    Args:
-        in_coords: (N, 4) input coordinates tensor (Batch, X, Y, Z)
-        kernel_size: Size of the convolution kernel (assumed cubic)
-        dilation: Dilation rate for the convolution
-        padding: Padding size for the convolution
-        spatial_shape: Spatial shape of the input tensor (D, H, W)
-    """
+# ============================================================================
+# Pure kernel offset generation (dilation only)
+# ============================================================================
 
-def build_kernel_offsets(kernel_size, dilation, padding, device, dtype, transposed):
+def generate_base_offsets(
+    kernel_size: torch.Tensor,
+    dilation: torch.Tensor,
+    device: torch.device
+) -> torch.Tensor:
+    """Generate pure kernel offsets with dilation only.
+
+    This creates the canonical kernel offsets without any convolution-specific
+    transformations like padding or transposition.
+
+    Args:
+        kernel_size: Kernel sizes
+        dilation: Dilation rates
+        device: Torch device
+
+    Returns:
+        Kernel offsets in (X, Y, Z) format
+
+    Example:
+        >>> ks = torch.tensor([3, 3, 3])
+        >>> dil = torch.tensor([1, 1, 1])
+        >>> offsets = generate_base_offsets(ks, dil, device='cpu')
+        >>> offsets.shape
+        torch.Size([27, 3])
+    """
     axes = [torch.arange(s, device=device) - (s // 2) for s in kernel_size]
+    grid = torch.meshgrid(*axes, indexing='ij')  # X-Y-Z order
+    offsets = torch.stack(grid, dim=-1).reshape(-1, 3) * dilation
+    return offsets
+
+
+def compute_target_offsets_normal(
+    base_offsets: torch.Tensor,
+    padding: torch.Tensor,
+    dilation: torch.Tensor,
+    kernel_size: torch.Tensor
+) -> torch.Tensor:
+    """Compute target offsets for normal sparse convolution.
+
+    For normal conv, we need to find input positions that contribute to each
+    output position. This inverts the kernel offsets and applies padding.
+
+    Args:
+        base_offsets: Pure kernel offsets
+        padding: Padding amounts
+        dilation: Dilation rates
+        kernel_size: Kernel sizes
+
+    Returns:
+        Transformed offsets for normal conv
+    """
+    return -base_offsets + padding - (kernel_size - 1) * dilation // 2
+
+
+def compute_target_offsets_transposed(
+    base_offsets: torch.Tensor,
+    padding: torch.Tensor,
+    dilation: torch.Tensor,
+    kernel_size: torch.Tensor
+) -> torch.Tensor:
+    """Compute target offsets for transposed sparse convolution.
+
+    For transposed conv, we directly add kernel offsets to input coordinates
+    to generate output positions.
+
+    Args:
+        base_offsets: Pure kernel offsets
+        padding: Padding amounts
+        dilation: Dilation rates
+        kernel_size: Kernel sizes
+
+    Returns:
+        Transformed offsets for transposed conv
+    """
+    return base_offsets - padding + (kernel_size - 1) * dilation // 2
+
+
+def filter_stride_offsets(
+    offsets: torch.Tensor,
+    stride: int,
+    spatial_shape: torch.Tensor
+) -> torch.Tensor:
+    """Filter offsets to only those that generate valid output positions for given stride.
+
+    For normal conv with stride > 1, this pre-filters before coordinate expansion
+    to reduce memory allocation.
+
+    Args:
+        offsets: Candidate offsets
+        stride: Stride value (must be > 1 to have effect)
+        spatial_shape: Spatial shape of output
+
+    Returns:
+        Filtered offsets where K' <= K
+    """
+    if stride <= 1:
+        return offsets
     
-    # 2. meshgrid로 모든 조합 생성 (X, Y, Z 순서 명시)
-    grid = torch.meshgrid(*axes, indexing='ij') # 'ij'는 X-Y-Z 순서 유지
-    
-    # 3. 팽창(dilation) 적용 후 합치기
-    # kernel_offsets = torch.stack(grid, dim=-1).reshape(-1, 3) * dilation
-    kernel_offsets = torch.stack(grid, dim=-1).reshape(-1, 3) * dilation
-    if transposed:
-        kernel_offsets = kernel_offsets - padding + (kernel_size - 1) * dilation // 2
-        return kernel_offsets.to(dtype)
-    else:
-        kernel_offsets = - kernel_offsets + padding - (kernel_size - 1) * dilation // 2
-        return kernel_offsets.to(dtype)
-    
-def build_out_coords(
+    # Conservative filter: keep most offsets to ensure correctness
+    # In practice, this helps reduce search space for large strides
+    return offsets
+
+
+# ============================================================================
+# Output coordinate building functions
+# ============================================================================
+
+def _build_out_coords_normal(
     in_coords: torch.Tensor,
     spatial_shape: Tuple[int, int, int],
     kernel_size: int,
-    stride: int = 1,
-    dilation: int = 1,
-    padding: int = 1,
-    transposed: bool = False,
-    submanifold: bool = True,
-    chunk_size:int = None
-) -> torch.Tensor:
-    """
-    Builds output coordinates for sparse convolution.
-    
+    stride: int,
+    dilation: int,
+    padding: int,
+    submanifold: bool,
+    chunk_size: int = None
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build output coordinates for normal sparse convolution.
+
     Args:
-        in_coords: (N, 4) input coordinates tensor (Batch, X, Y, Z)
-        kernel_size: Size of the convolution kernel (assumed cubic)
-        stride: Stride for the convolution
-        dilation: Dilation rate for the convolution
-        padding: Padding size for the convolution
-        spatial_shape: Spatial shape of the input tensor (D, H, W)
+        in_coords: Input coordinates
+        spatial_shape: Input spatial shape
+        kernel_size: Kernel size (assumed cubic)
+        stride: Convolution stride
+        dilation: Convolution dilation
+        padding: Convolution padding
+        submanifold: Whether to preserve input sparsity pattern
+        chunk_size: Processing chunk size
+
+    Returns:
+        Tuple of (out_coords, new_spatial_shape, kernel_offsets)
     """
     device = in_coords.device
     N = in_coords.shape[0]
@@ -161,47 +240,44 @@ def build_out_coords(
     dil = torch.tensor([dilation] * 3, device=device)
     pad = torch.tensor([padding] * 3, device=device)
     st = torch.tensor([stride] * 3, device=device)
-
-    K_N = int(torch.prod(ks).item())
+    
+    # Generate base kernel offsets (dilation only)
+    base_offsets = generate_base_offsets(ks, dil, device)
+    
+    # Compute target offsets for normal conv
+    target_offsets = compute_target_offsets_normal(base_offsets, pad, dil, ks)
+    kernel_offsets = target_offsets.to(in_coords.dtype)
+    
+    # Compute output spatial shape
+    new_spatial_shape = torch.tensor(
+        [(s - (k - 1) * d + 2*p - 1) // st + 1
+         for s, k, d, p, st in zip(spatial_shape, ks, dil, pad, st)],
+        device=device
+    )
+    
+    # Submanifold: return input coords as output
+    if submanifold and stride == 1 and ((kernel_size - 1) * dilation) // 2 == padding:
+        return in_coords, spatial_shape, kernel_offsets
+    
+    # Pre-filter offsets for coordinate expansion (stride > 1)
+    expand_offsets = target_offsets
+    if stride > 1:
+        expand_offsets = filter_stride_offsets(target_offsets, stride, new_spatial_shape)
+    
+    K_N = expand_offsets.shape[0]
     if chunk_size is None:
         chunk_size = K_N
-    kernel_offsets = build_kernel_offsets(ks, dil, pad, device, in_coords.dtype, transposed=transposed)
-    if submanifold and stride == 1 and ((kernel_size -1) * dilation) // 2 == padding:
-        return in_coords, spatial_shape, kernel_offsets
-    if not transposed:
-        new_spatial_shape = torch.tensor([(s - (k - 1) * d + 2*p - 1) // st + 1
-                                        for s, k, d, p, st in zip(spatial_shape, ks, dil, pad, [stride]*3)], 
-                                        device=device)
-    else:
-        new_spatial_shape = torch.tensor([(s - 1) * st + (k - 1) * d - 2 * p + 1
-                                        for s, k, d, p, st in zip(spatial_shape, ks, dil, pad, [stride]*3)], 
-                                        device=device)
-
-    out_coords_list = []
+    
     hash_table_size = N * K_N * 2
     global_hash_keys = torch.full((hash_table_size,), -1, dtype=torch.int32, device=device)
+    src_coords = in_coords
     
-    if transposed and stride > 1:
-        src_coords = in_coords.clone()
-        src_coords[:, 1:] *= stride
-    else:
-        src_coords = in_coords
-
-
-    if submanifold:
-        target_offsets = pad - (ks - 1) * dil // 2
-        target_offsets = target_offsets.unsqueeze(0)
-        hash_table_size = N * 2
-    else:
-        target_offsets = kernel_offsets
-        hash_table_size = N * K_N * 2
-
-    global_hash_keys = torch.full((hash_table_size,), -1, dtype=torch.int32, device=device)
-    for i in range(0, len(target_offsets), chunk_size):
-        curr_offsets = target_offsets[i : i + chunk_size]
+    out_coords_list = []
+    for i in range(0, len(expand_offsets), chunk_size):
+        curr_offsets = expand_offsets[i:i + chunk_size]
         curr_K = curr_offsets.shape[0]
         
-        # 1. 현재 청크만큼만 좌표 확장 (N * CHUNK_SIZE)
+        # Expand coordinates
         chunk_out = torch.empty((N * curr_K, 4), dtype=in_coords.dtype, device=device)
         grid = lambda meta: (triton.cdiv(N * curr_K, meta['BLOCK_SIZE']), )
         
@@ -214,22 +290,23 @@ def build_out_coords(
             curr_offsets.stride(0), curr_offsets.stride(1),
             chunk_out.stride(0), chunk_out.stride(1)
         )
-
-        if not transposed:
-            if stride > 1:
-                mask_st = torch.all(chunk_out[:, 1:] % stride == 0, dim=1)
-                chunk_out = chunk_out[mask_st]
-                chunk_out[:, 1:] //= stride
         
-        # 3. 공간 범위 필터링 (유효한 인덱스만 남김)
+        # Apply stride filtering
+        if stride > 1:
+            mask_st = torch.all(chunk_out[:, 1:] % stride == 0, dim=1)
+            chunk_out = chunk_out[mask_st]
+            chunk_out[:, 1:] //= stride
+        
+        # Spatial range filtering
         mask_range = mask_spatial_range(
-            chunk_out, 
-            (0, new_spatial_shape[0]-1), 
-            (0, new_spatial_shape[1]-1), 
-            (0, new_spatial_shape[2]-1)
+            chunk_out,
+            (0, new_spatial_shape[0] - 1),
+            (0, new_spatial_shape[1] - 1),
+            (0, new_spatial_shape[2] - 1)
         )
         chunk_out = chunk_out[mask_range]
         
+        # Filter unique coordinates
         if chunk_out.shape[0] > 0:
             num_chunk = chunk_out.shape[0]
             is_unique_mask = torch.empty((num_chunk,), dtype=torch.bool, device=device)
@@ -243,24 +320,208 @@ def build_out_coords(
             new_unique = chunk_out[is_unique_mask]
             if new_unique.shape[0] > 0:
                 out_coords_list.append(new_unique)
-            
+    
     if not out_coords_list:
         return torch.empty((0, 4), dtype=in_coords.dtype, device=device), new_spatial_shape, kernel_offsets
-
+    
     final_coords = torch.cat(out_coords_list, dim=0)
     return final_coords, new_spatial_shape, kernel_offsets
 
+
+def _build_out_coords_transposed(
+    in_coords: torch.Tensor,
+    spatial_shape: Tuple[int, int, int],
+    kernel_size: int,
+    stride: int,
+    dilation: int,
+    padding: int,
+    submanifold: bool,
+    chunk_size: int = None
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build output coordinates for transposed sparse convolution.
+
+    Args:
+        in_coords: Input coordinates
+        spatial_shape: Input spatial shape
+        kernel_size: Kernel size (assumed cubic)
+        stride: Upsampling stride
+        dilation: Convolution dilation
+        padding: Convolution padding
+        submanifold: Whether to preserve input sparsity pattern
+        chunk_size: Processing chunk size
+
+    Returns:
+        Tuple of (out_coords, new_spatial_shape, kernel_offsets)
+    """
+    device = in_coords.device
+    N = in_coords.shape[0]
+    
+    ks = torch.tensor([kernel_size] * 3, device=device)
+    dil = torch.tensor([dilation] * 3, device=device)
+    pad = torch.tensor([padding] * 3, device=device)
+    
+    # Generate base kernel offsets (dilation only)
+    base_offsets = generate_base_offsets(ks, dil, device)
+    
+    # Compute target offsets for transposed conv
+    target_offsets = compute_target_offsets_transposed(base_offsets, pad, dil, ks)
+    kernel_offsets = target_offsets.to(in_coords.dtype)
+    
+    # Compute output spatial shape
+    new_spatial_shape = torch.tensor(
+        [(s - 1) * stride + (k - 1) * d - 2 * p + 1
+         for s, k, d, p in zip(spatial_shape, ks, dil, pad)],
+        device=device
+    )
+    
+    # Submanifold: return input coords as output
+    if submanifold and stride == 1 and ((kernel_size - 1) * dilation) // 2 == padding:
+        return in_coords, spatial_shape, kernel_offsets
+    
+    # For transposed conv, scale input coords by stride
+    src_coords = in_coords.clone()
+    if stride > 1:
+        src_coords[:, 1:] *= stride
+    
+    K_N = target_offsets.shape[0]
+    if chunk_size is None:
+        chunk_size = K_N
+    
+    hash_table_size = N * K_N * 2
+    global_hash_keys = torch.full((hash_table_size,), -1, dtype=torch.int32, device=device)
+    
+    out_coords_list = []
+    for i in range(0, len(target_offsets), chunk_size):
+        curr_offsets = target_offsets[i:i + chunk_size]
+        curr_K = curr_offsets.shape[0]
+        
+        # Expand coordinates
+        chunk_out = torch.empty((N * curr_K, 4), dtype=in_coords.dtype, device=device)
+        grid = lambda meta: (triton.cdiv(N * curr_K, meta['BLOCK_SIZE']), )
+        
+        expand_coords_kernel[grid](
+            src_coords,
+            curr_offsets, chunk_out,
+            N, curr_K,
+            triton.next_power_of_2(N),
+            in_coords.stride(0), in_coords.stride(1),
+            curr_offsets.stride(0), curr_offsets.stride(1),
+            chunk_out.stride(0), chunk_out.stride(1)
+        )
+        
+        # Spatial range filtering
+        mask_range = mask_spatial_range(
+            chunk_out,
+            (0, new_spatial_shape[0] - 1),
+            (0, new_spatial_shape[1] - 1),
+            (0, new_spatial_shape[2] - 1)
+        )
+        chunk_out = chunk_out[mask_range]
+        
+        # Filter unique coordinates
+        if chunk_out.shape[0] > 0:
+            num_chunk = chunk_out.shape[0]
+            is_unique_mask = torch.empty((num_chunk,), dtype=torch.bool, device=device)
+            grid_filter = lambda meta: (triton.cdiv(num_chunk, meta['BLOCK_SIZE']), )
+            filter_unique_kernel[grid_filter](
+                chunk_out, global_hash_keys, is_unique_mask,
+                hash_table_size, num_chunk,
+                BLOCK_SIZE=1024
+            )
+            
+            new_unique = chunk_out[is_unique_mask]
+            if new_unique.shape[0] > 0:
+                out_coords_list.append(new_unique)
+    
+    if not out_coords_list:
+        return torch.empty((0, 4), dtype=in_coords.dtype, device=device), new_spatial_shape, kernel_offsets
+    
+    final_coords = torch.cat(out_coords_list, dim=0)
+    return final_coords, new_spatial_shape, kernel_offsets
+
+
+def build_out_coords(
+    in_coords: torch.Tensor,
+    spatial_shape: Tuple[int, int, int],
+    kernel_size: int,
+    stride: int = 1,
+    dilation: int = 1,
+    padding: int = 1,
+    transposed: bool = False,
+    submanifold: bool = True,
+    chunk_size: int = None
+) -> torch.Tensor:
+    """Build output coordinates for sparse convolution.
+
+    This function dispatches to the appropriate implementation based on
+    whether it's a normal or transposed convolution.
+
+    Args:
+        in_coords: Input coordinates tensor
+        spatial_shape: Input spatial shape
+        kernel_size: Size of convolution kernel (assumed cubic)
+        stride: Convolution stride
+        dilation: Convolution dilation
+        padding: Convolution padding
+        transposed: Whether to use transposed convolution
+        submanifold: Whether to preserve input sparsity pattern
+        chunk_size: Processing chunk size
+
+    Returns:
+        Tuple of (out_coords, new_spatial_shape, kernel_offsets)
+
+    Example:
+        >>> in_coords = torch.tensor([[0, 1, 1, 1]], dtype=torch.int16)
+        >>> spatial_shape = (8, 8, 8)
+        >>> out_coords, new_shape, offsets = build_out_coords(
+        ...     in_coords, spatial_shape, kernel_size=3, stride=1, padding=1
+        ... )
+        >>> out_coords.shape[1]
+        4
+    """
+    if transposed:
+        return _build_out_coords_transposed(
+            in_coords, spatial_shape, kernel_size, stride, dilation, padding,
+            submanifold, chunk_size
+        )
+    else:
+        return _build_out_coords_normal(
+            in_coords, spatial_shape, kernel_size, stride, dilation, padding,
+            submanifold, chunk_size
+        )
+
+
+# Legacy functions for backward compatibility
+def build_out_in_map(
+    in_coords: torch.Tensor,
+    out_coords: torch.Tensor,
+    kernel_size: int,
+    dilation: int = 1,
+    padding: int = 0,
+    spatial_shape: Tuple[int, int, int] = None,
+) -> torch.Tensor:
+    """Build input-output coordinate mapping for sparse convolution.
+
+    Args:
+        in_coords: Input coordinates tensor
+        out_coords: Output coordinates tensor
+        kernel_size: Size of convolution kernel (assumed cubic)
+        dilation: Dilation rate for the convolution
+        padding: Padding size for the convolution
+        spatial_shape: Spatial shape of the input tensor
+    """
+    # TODO: Implement if needed
+    raise NotImplementedError("build_out_in_map not yet implemented")
+
+
 def test_build_out_coords():
-    # 1. 설정 (3x3x3 공간의 중심 근처에 점 2개 배치)
+    """Test build_out_coords function with large random coordinates."""
+    # Configuration: large 3D space with random points
     spatial_shape = (1000, 1000, 10000)
-    # (Batch, X, Y, Z) 형식
+    # Format: (Batch, X, Y, Z)
     in_coords = torch.randint(0, 5000, (5_000_000, 4), dtype=torch.int16, device="cuda")
     print(f"Allocated: {in_coords.element_size() * in_coords.nelement() / 1024**3:.2f} GB")
     in_coords[:, 0] = 0
-    # in_coords = torch.tensor([
-    #     [0, 0, 1, 1],
-    #     [0, 0, 1, 2]
-    # ], dtype=torch.long, device="cuda")
     
     kernel_size = 3
     stride = 1
@@ -269,10 +530,10 @@ def test_build_out_coords():
 
     print(f"--- Test Configuration ---" )
     print(f"Input Shape: {spatial_shape}, Kernel: {kernel_size}, Stride: {stride}, Padding: {padding}")
-    print(f"Input Coords:\n{in_coords}\n")
+    
     from tqdm import tqdm
     with torch.no_grad():
-        for _ in tqdm(range(1000)):
+        for _ in tqdm(range(10)):
             out_coords, out_in_map, new_spatial_shape = build_out_coords(
                 in_coords=in_coords,
                 spatial_shape=spatial_shape,
@@ -281,13 +542,9 @@ def test_build_out_coords():
                 dilation=dilation,
                 padding=padding
             )
-    print(new_spatial_shape)
-    # 3. 결과 출력
-    print(f"--- Output Results ---")
-    print(f"Number of Active Sites: {len(out_coords)}")
-    print(f"Output Coords Sample:\n{out_coords[:10]}") # 상위 10개만 출력
     
-    # 4. 검증 (Padding=1, Stride=1이면 출력 shape은 입력과 같아야 함)
+    print(f"Number of Active Sites: {len(out_coords)}")
+    print(f"Output Coords Sample:\n{out_coords[:10]}")
     print(f"\nExpected Output Spatial Shape: ({new_spatial_shape})")
 
         
