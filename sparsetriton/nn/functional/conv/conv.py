@@ -3,7 +3,7 @@ from sparsetriton import SparseTensor
 from sparsetriton.utils.hash import HashTable
 from typing import *
 from .funcs import ConvHashOnTheFlyImplicitGEMM
-from .kmap import build_out_coords, build_kernel_offsets
+from .kmap import build_out_coords
 from sparsetriton.config import get_h_table_f
 
 def sparse_conv3d(
@@ -105,6 +105,7 @@ def sparse_conv3d(
             kernel_offsets,
             in_hash_table.table_keys,
             in_hash_table.table_values,
+            tensor.spatial_shape,
         )
         
     else:
@@ -120,6 +121,7 @@ def sparse_conv3d(
             kernel_offsets,
             in_hash_table.table_keys,
             in_hash_table.table_values,
+            tensor.spatial_shape,
         )
 
     if bias is not None:
