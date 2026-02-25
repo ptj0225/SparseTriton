@@ -24,11 +24,30 @@ This project is currently under active development. While core functionalities a
 
 ## 🛠 Architecture
 
-
-
 1.  **Coordinate Hashing**: Map 3D coordinates to linear indices using a parallel hash table.
 2.  **Rulebook Generation**: Identify active neighbor pairs for each kernel offset.
-3.  **Gather-GEMM-Scatter**: 
+3.  **Gather-GEMM-Scatter**:
     * **Gather**: Collect features based on the rulebook.
     * **GEMM**: Perform matrix multiplication using Triton's fused kernels.
     * **Scatter**: Distribute results back to the output sparse tensor.
+
+---
+
+## 📋 TODO
+
+### Known Issues
+- [ ] Backward pass weight gradient incorrect (99.5% mismatch) - `DEBUG_SUMMARY.md`
+- [ ] Transposed convolution forward fails for stride=2 cases
+- [ ] Pooling operations fail on CPU (atomic operations not supported)
+
+### CPU Support
+- [ ] CPU implementation or fallback (many tests skipped on CPU)
+
+### Performance Optimization
+- [ ] Autotuner config tuning (C_in=1, 64 show issues)
+- [ ] Memory efficiency for large-scale point clouds
+
+### Features
+- [ ] More activation functions
+- [ ] Batch normalization for CPU
+- [ ] Documentation & API reference
