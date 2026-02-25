@@ -159,7 +159,8 @@ def compute_target_offsets_transposed(
     base_offsets: torch.Tensor,
     padding: torch.Tensor,
     dilation: torch.Tensor,
-    kernel_size: torch.Tensor
+    kernel_size: torch.Tensor,
+    stride: torch.Tensor = None
 ) -> torch.Tensor:
     """Compute target offsets for transposed sparse convolution.
 
@@ -171,6 +172,7 @@ def compute_target_offsets_transposed(
         padding: Padding amounts
         dilation: Dilation rates
         kernel_size: Kernel sizes
+        stride: Stride values (unused - scaling is done in coord expansion)
 
     Returns:
         Transformed offsets for transposed conv
@@ -359,14 +361,14 @@ def _build_out_coords_transposed(
     ks = torch.tensor([kernel_size] * 3, device=device)
     dil = torch.tensor([dilation] * 3, device=device)
     pad = torch.tensor([padding] * 3, device=device)
-    
+
     # Generate base kernel offsets (dilation only)
     base_offsets = generate_base_offsets(ks, dil, device)
-    
-    # Compute target offsets for transposed conv
+
+    # Compute target offsets for transposed conv (no stride scaling)
     target_offsets = compute_target_offsets_transposed(base_offsets, pad, dil, ks)
     kernel_offsets = target_offsets.to(in_coords.dtype)
-    
+
     # Compute output spatial shape
     new_spatial_shape = torch.tensor(
         [(s - 1) * stride + (k - 1) * d - 2 * p + 1
@@ -377,30 +379,32 @@ def _build_out_coords_transposed(
     # Submanifold: return input coords as output
     if submanifold and stride == 1 and ((kernel_size - 1) * dilation) // 2 == padding:
         return in_coords, spatial_shape, kernel_offsets
-    
-    # For transposed conv, scale input coords by stride
-    src_coords = in_coords.clone()
-    if stride > 1:
-        src_coords[:, 1:] *= stride
-    
-    K_N = target_offsets.shape[0]
+
+    # Use original input coordinates (no scaling)
+    src_coords = in_coords
+
+    # For transposed conv, use original kernel offsets (don't scale by stride)
+    # Stride is only applied to input positions (src_coords * stride below)
+    expand_offsets = target_offsets
+
+    K_N = expand_offsets.shape[0]
     if chunk_size is None:
         chunk_size = K_N
-    
+
     hash_table_size = N * K_N * 2
     global_hash_keys = torch.full((hash_table_size,), -1, dtype=torch.int32, device=device)
-    
+
     out_coords_list = []
-    for i in range(0, len(target_offsets), chunk_size):
-        curr_offsets = target_offsets[i:i + chunk_size]
+    for i in range(0, len(expand_offsets), chunk_size):
+        curr_offsets = expand_offsets[i:i + chunk_size]
         curr_K = curr_offsets.shape[0]
-        
+
         # Expand coordinates
         chunk_out = torch.empty((N * curr_K, 4), dtype=in_coords.dtype, device=device)
         grid = lambda meta: (triton.cdiv(N * curr_K, meta['BLOCK_SIZE']), )
-        
+
         expand_coords_kernel[grid](
-            src_coords,
+            src_coords * stride,
             curr_offsets, chunk_out,
             N, curr_K,
             triton.next_power_of_2(N),

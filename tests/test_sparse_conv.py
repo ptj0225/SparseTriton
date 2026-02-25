@@ -75,7 +75,7 @@ class TestSparseConvTranspose3DForward:
     @pytest.mark.parametrize("C_in, C_out, kernel_size, stride, padding, dilation",
         [
             # stride=1
-            (8, 16, 3, 1, 1, 1),
+            (8, 16, 3, 2, 1, 1),
             (16, 16, 3, 1, 1, 1),
             (32, 32, 3, 1, 1, 1),
             (16, 16, 5, 1, 2, 1),
@@ -83,7 +83,9 @@ class TestSparseConvTranspose3DForward:
             (64, 64, 5, 1, 2, 1),
             # stride=2 (skipped due to kernel bug)
             (4, 8, 3, 2, 1, 1),
+            (4, 8, 3, 2, 1, 1),
             (8, 16, 3, 2, 1, 1),
+            (8, 16, 3, 4, 1, 1),
             (16, 16, 5, 1, 2, 1),
         ])
     def test_sparse_conv_transpose3d_forward(self, C_in, C_out, kernel_size, stride, padding, dilation):
@@ -97,7 +99,7 @@ class TestSparseConvTranspose3DForward:
         st_tensor = randn(spatial_shape, batch_size=1, channels=C_in, nnz=27, device=device).half()
 
         # Create convolution weight (K, C_in, C_out)
-        weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16, requires_grad=True)
+        weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16, requires_grad=True) / (kernel_size**3)
 
         # Run sparsetriton transposed convolution
         st_out_tensor = sparse_conv3d(
@@ -133,8 +135,7 @@ class TestSparseConvTranspose3DForward:
 
         assert st_dense_output.shape == torch_dense_output.shape, \
             f"Shape mismatch: {st_dense_output.shape} vs {torch_dense_output.shape}"
-
-        torch.testing.assert_close(st_dense_output, torch_dense_output, atol=1e-3, rtol=1e-3), \
+        torch.testing.assert_close(st_dense_output, torch_dense_output, atol=1e-3, rtol=1e-3)
 
 
 class TestSparseConv3DBackward:

@@ -255,7 +255,7 @@ def implicit_gemm_bwd_weight_kernel(
         table_size, off_n, N, BLOCK_SIZE_N
     )  # (BLOCK_SIZE_N,)
     
-    valid_mask = (in_indices != -1) & mask_n & (curr_x >= 0) & (curr_y >= 0) & (curr_z >= 0) & (curr_x < spatial_shape_x) & (curr_y < spatial_shape_y) & (curr_z < spatial_shape_z)
+    valid_mask = (in_indices != -1) & mask_n & (curr_x >= 0) & (curr_y >= 0) & (curr_z >= 0)
     
     # Clamp in_indices to avoid negative indexing
     in_indices_safe = tl.where(in_indices >= 0, in_indices, 0)
@@ -356,7 +356,6 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
             triton.cdiv(N_out, META['BLOCK_SIZE_N']),
             triton.cdiv(C_in, META['BLOCK_SIZE_C_IN'])
         )
-        
         implicit_gemm_bwd_feat_kernel[grid_feat](
             d_out_ptr=grad_output, 
             weights_ptr=weights,
@@ -397,45 +396,3 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
         )
         
         return grad_input, grad_weights, None, None, None, None, None
-        
-    
-
-if __name__ == "__main__":
-    from sparsetriton.tensor import randn
-    from sparsetriton.nn.functional.conv.kmap import build_out_coords, build_kernel_offsets
-    from sparsetriton.utils.hash import HashTable
-    from torch.optim import Adam
-    
-    device = "cuda"
-    test_tensor = randn(batch_size=10, spatial_shape=(512, 512, 512), nnz=13421772 // 100, channels=16, device=device)
-    stride = torch.tensor([1] * 3, device=device)
-    pad = torch.tensor([1] * 3, device=device)
-    ks = torch.tensor([3] * 3, device=device)
-    dilation = torch.tensor([1] * 3, device=device)
-    weights = torch.rand((27, 16, 16), device=device, dtype=torch.float)
-    weights = torch.nn.Parameter(weights)
-    bias = torch.rand((16), device=device, dtype=torch.float)
-    ht = HashTable(test_tensor.C.__len__() * 4, device=device)
-    ht.insert(test_tensor.C)
-    optim = Adam([weights, bias], lr=0.1)
-    out_coords, _ = build_out_coords(test_tensor.C, test_tensor.spatial_shape, 3, 1, 1, 1)
-    # torch.cuda.empty_cache()
-    kernel_offsets = build_kernel_offsets(device=device, dtype=test_tensor.C.dtype, dilation=dilation, kernel_size=ks, padding=pad)
-    # print(out_coords.shape)
-    from tqdm import tqdm
-    for _ in tqdm(range(1000)):
-        test_tensor = randn(batch_size=10, spatial_shape=(512, 512, 512), nnz=13421772 // 100, channels=16, device=device)
-        out_coords, _ = build_out_coords(test_tensor.C, test_tensor.spatial_shape, 3, 1, 1, 1)
-        ht = HashTable(test_tensor.C.__len__() * 4, device=device)
-        ht.insert(test_tensor.C)
-        result = ConvHashOnTheFlyImplicitGEMM.apply(
-            test_tensor.F, weights, out_coords, kernel_offsets,
-            ht.table_keys, ht.table_values
-        )
-        result = result + bias
-        optim.zero_grad()
-        (result-3).pow(2).mean().backward()
-        print(result.abs().mean().item())
-        print((result-3).pow(2).mean().item())
-        optim.step()
-    print(result)

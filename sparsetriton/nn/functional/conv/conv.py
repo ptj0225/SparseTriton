@@ -30,7 +30,6 @@ def sparse_conv3d(
         padding (int or tuple, optional): Padding of the convolution. Defaults to 0.
         submanifold (bool, optional): If True, performs a submanifold sparse convolution. Defaults to False.
     """
-
     if isinstance(kernel_size, tuple):
         # Assuming cubic kernel for now, as build_out_coords takes an int
         assert kernel_size[0] == kernel_size[1] == kernel_size[2], "Only cubic kernels supported for now"
@@ -64,7 +63,7 @@ def sparse_conv3d(
     
     assert C_in == tensor.F.shape[1], f"Input channels in weight({C_in}) and tensor({tensor.F.shape[1]}) must match"
     assert K == k_size**3, f"Kernel size in weight({K}) and argument({k_size**3}) must match"
-
+    
     if transposed and s > 1:
         in_hash_table = HashTable(int(tensor.C.shape[0] * get_h_table_f()), device=device)
         key_coords = tensor.C.clone()
@@ -88,7 +87,6 @@ def sparse_conv3d(
         transposed=transposed,
         submanifold=submanifold
     )
-
     if out_coords.shape[0] == 0:
         return SparseTensor(
             feats=torch.empty((0, C_out), device=device, dtype=tensor.F.dtype),
@@ -98,6 +96,11 @@ def sparse_conv3d(
         )
     
     if transposed:
+        if s > 1:
+            spatial_shape = list(map(lambda x: x * s, tensor.spatial_shape))
+        else:
+            spatial_shape = tensor.spatial_shape
+
         out_feats = ConvHashOnTheFlyImplicitGEMM.apply(
             tensor.F,
             weight,
@@ -105,19 +108,14 @@ def sparse_conv3d(
             kernel_offsets,
             in_hash_table.table_keys,
             in_hash_table.table_values,
-            tensor.spatial_shape,
+            spatial_shape,
         )
         
     else:
-        if s > 1:
-            out_coords_scaled = out_coords.clone()
-            out_coords_scaled[:, 1:] *= s
-        else:
-            out_coords_scaled = out_coords
         out_feats = ConvHashOnTheFlyImplicitGEMM.apply(
             tensor.F,
             weight,
-            out_coords_scaled,
+            out_coords,
             kernel_offsets,
             in_hash_table.table_keys,
             in_hash_table.table_values,
