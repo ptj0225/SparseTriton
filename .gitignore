@@ -209,3 +209,6 @@ __marimo__/
 # Debug scripts (temporary)
 debug_*.py
 tmp.py
+
+# Debug documentation (keep local, don't track)
+DEBUG_SUMMARY.md
