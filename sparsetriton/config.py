@@ -40,6 +40,7 @@ _STATE: dict = {
     "algo": ConvAlgo.ImplicitHashFlyGEMM,
     "h_tbl_factor": 1.5,
     "h_tbl_max_probe_n": 16,
+    "force_cpu": False,  # Force CPU fallback even on GPU devices
 }
 
 
@@ -199,3 +200,40 @@ def get_h_table_max_p() -> int:
         True
     """
     return _STATE["h_tbl_max_probe_n"]
+
+
+def set_force_cpu(force: bool) -> None:
+    """Force CPU fallback for sparse operations.
+
+    When enabled, sparse convolutions will use CPU implementations
+    even on GPU devices. Useful for debugging or when GPU memory is limited.
+
+    Args:
+        force: Whether to force CPU fallback
+
+    Raises:
+        TypeError: If force is not a bool
+
+    Example:
+        >>> from sparsetriton.config import set_force_cpu, get_force_cpu
+        >>> set_force_cpu(True)
+        >>> get_force_cpu()
+        True
+    """
+    if not isinstance(force, bool):
+        raise TypeError(f"Expected bool, got {type(force)}")
+    _STATE["force_cpu"] = force
+
+
+def get_force_cpu() -> bool:
+    """Get whether CPU fallback is forced.
+
+    Returns:
+        bool: Current force CPU setting
+
+    Example:
+        >>> from sparsetriton.config import get_force_cpu
+        >>> get_force_cpu()
+        False
+    """
+    return _STATE["force_cpu"]
