@@ -285,7 +285,7 @@ def _sparse_conv_forward_cpu(
                 # Apply convolution
                 out_feats[i] += torch.mm(
                     in_feats[in_idx:in_idx+1],
-                    weight[j].t()
+                    weight[j]
                 ).squeeze(0)
 
     return out_feats
