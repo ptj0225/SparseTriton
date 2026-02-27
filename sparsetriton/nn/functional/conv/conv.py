@@ -49,6 +49,10 @@ def sparse_conv3d(
     else:
         d = dilation
 
+    if submanifold:
+        # For submanifold conv, force center padding using normalized scalar values.
+        padding = ((k_size - 1) * d) // 2
+
     if isinstance(padding, tuple):
         assert padding[0] == padding[1] == padding[2], "Only uniform padding supported for now"
         p = padding[0]

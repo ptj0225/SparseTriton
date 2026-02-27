@@ -261,7 +261,6 @@ class SubMConv3D(SparseConv3DBase):
         out_channels: int,
         kernel_size: Union[int, Tuple[int, int, int]] = 3,
         stride: Union[int, Tuple[int, int, int]] = 1,
-        padding: Union[int, Tuple[int, int, int]] = 0,
         dilation: Union[int, Tuple[int, int, int]] = 1,
         bias: bool = True,
     ):
@@ -272,7 +271,6 @@ class SubMConv3D(SparseConv3DBase):
             out_channels: Number of output feature channels
             kernel_size: Size of the convolution kernel (int or tuple of 3)
             stride: Must be 1 for submanifold convolution (int or tuple of 3)
-            padding: Zero-padding added to all sides (int or tuple of 3)
             dilation: Spacing between kernel elements (int or tuple of 3)
             bias: Whether to include a bias term
 
@@ -289,7 +287,6 @@ class SubMConv3D(SparseConv3DBase):
             out_channels=out_channels,
             kernel_size=kernel_size,
             stride=stride,
-            padding=padding,
             dilation=dilation,
             bias=bias,
             subm=True,
