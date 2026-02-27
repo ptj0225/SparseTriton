@@ -239,7 +239,6 @@ class SubMConv3D(SparseConv3DBase):
         out_channels: Number of output channels
         kernel_size: Size of the convolution kernel
         stride: Must be 1 (required for submanifold conv)
-        padding: Zero-padding added to all sides
         dilation: Spacing between kernel elements
         bias: Whether to include a bias term
 
