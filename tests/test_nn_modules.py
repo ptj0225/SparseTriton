@@ -22,6 +22,12 @@ from sparsetriton.nn.modules import (
 )
 
 
+def _require_cuda(skip_message: str) -> torch.device:
+    if not torch.cuda.is_available():
+        pytest.skip(skip_message)
+    return torch.device("cuda")
+
+
 class TestSparseConv3D:
     """Test SparseConv3D module."""
 
@@ -63,19 +69,15 @@ class TestSparseConv3D:
 
     def test_forward(self):
         """Test forward pass."""
-        device = "cpu"
+        device = _require_cuda("CUDA not available for sparse conv")
         sp_tensor = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device=device)
 
-        conv = SparseConv3D(in_channels=4, out_channels=8, kernel_size=3)
-
-        # Note: This will use Triton kernels which may require CUDA
-        # For now, just check that the module is callable
+        conv = SparseConv3D(in_channels=4, out_channels=8, kernel_size=3).to(device)
         try:
             output = conv(sp_tensor)
-            assert isinstance(output, SparseTensor)
         except Exception:
-            # Expected if CUDA not available
-            pytest.skip("CUDA not available for sparse conv")
+            pytest.skip("SparseConv3D kernel failed")
+        assert isinstance(output, SparseTensor)
 
 
 class TestSubMConv3D:
@@ -91,16 +93,23 @@ class TestSubMConv3D:
 
     def test_forward(self):
         """Test forward pass."""
-        device = "cpu"
+        device = _require_cuda("CUDA not available for sparse conv")
         sp_tensor = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device=device)
 
-        conv = SubMConv3D(in_channels=4, out_channels=8, kernel_size=3)
-
+        conv = SubMConv3D(in_channels=4, out_channels=8, kernel_size=3).to(device)
         try:
             output = conv(sp_tensor)
-            assert isinstance(output, SparseTensor)
         except Exception:
-            pytest.skip("CUDA not available for sparse conv")
+            pytest.skip("SubMConv3D kernel failed")
+        assert isinstance(output, SparseTensor)
+
+    def test_init_default_padding(self):
+        """Test SubMConv3D uses default padding from base class."""
+        conv = SubMConv3D(in_channels=4, out_channels=8, kernel_size=5)
+
+        assert conv.kernel_size == (5, 5, 5)
+        assert conv.padding == (0, 0, 0)
+        assert conv.subm is True
 
 
 class TestSparseConvTransposed3D:
@@ -272,10 +281,7 @@ class TestSparsePooling:
 
     def test_forward(self):
         """Test forward pass."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for pooling")
-
-        device = torch.device("cuda")
+        device = _require_cuda("CUDA required for pooling")
         sp_tensor = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device=device)
 
         pool = SparsePooling(kernel_size=2, mode="max")

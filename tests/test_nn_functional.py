@@ -6,6 +6,12 @@ from sparsetriton import SparseTensor, randn
 from sparsetriton.nn.functional import sparse_batch_norm, sparse_pooling, sparse_upsample
 
 
+def _require_cuda(skip_message: str) -> torch.device:
+    if not torch.cuda.is_available():
+        pytest.skip(skip_message)
+    return torch.device("cuda")
+
+
 class TestSparseBatchNorm:
     """Test sparse_batch_norm function."""
 
@@ -64,35 +70,18 @@ class TestSparseBatchNorm:
 class TestSparsePooling:
     """Test sparse_pooling function."""
 
-    def test_forward_max(self):
-        """Test max pooling forward pass."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for pooling")
-
-        device = torch.device("cuda")
+    @pytest.mark.parametrize("mode", ["max", "avg"])
+    def test_forward(self, mode):
+        """Test pooling forward pass for supported modes."""
+        device = _require_cuda("CUDA required for pooling")
         sp_tensor = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device=device)
 
         try:
-            output = sparse_pooling(sp_tensor, kernel_size=2, padding=0, stride=2, mode="max")
-
-            assert isinstance(output, SparseTensor)
+            output = sparse_pooling(sp_tensor, kernel_size=2, padding=0, stride=2, mode=mode)
         except Exception:
             pytest.skip("Pooling kernel failed")
 
-    def test_forward_avg(self):
-        """Test average pooling forward pass."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for pooling")
-
-        device = torch.device("cuda")
-        sp_tensor = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device=device)
-
-        try:
-            output = sparse_pooling(sp_tensor, kernel_size=2, padding=0, stride=2, mode="avg")
-
-            assert isinstance(output, SparseTensor)
-        except Exception:
-            pytest.skip("Pooling kernel failed")
+        assert isinstance(output, SparseTensor)
 
     def test_forward_invalid_mode(self):
         """Test with invalid pooling mode."""
@@ -106,33 +95,15 @@ class TestSparsePooling:
 class TestSparseUpsample:
     """Test sparse_upsample function."""
 
-    def test_forward_scale_2(self):
-        """Test upsampling with scale factor 2."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for upsampling")
-
-        device = torch.device("cuda")
-        sp_tensor = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device=device)
+    @pytest.mark.parametrize("scale_factor, nnz", [(2, 10), (3, 5)])
+    def test_forward(self, scale_factor, nnz):
+        """Test upsampling forward pass for representative scale factors."""
+        device = _require_cuda("CUDA required for upsampling")
+        sp_tensor = randn((16, 16, 16), batch_size=2, nnz=nnz, channels=4, device=device)
 
         try:
-            output = sparse_upsample(sp_tensor, scale_factor=2)
-
-            assert isinstance(output, SparseTensor)
-            # Output should have 2^3 = 8x more points (if all coordinates are unique)
+            output = sparse_upsample(sp_tensor, scale_factor=scale_factor)
         except Exception:
             pytest.skip("Upsample kernel failed")
 
-    def test_forward_scale_3(self):
-        """Test upsampling with scale factor 3."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for upsampling")
-
-        device = torch.device("cuda")
-        sp_tensor = randn((16, 16, 16), batch_size=2, nnz=5, channels=4, device=device)
-
-        try:
-            output = sparse_upsample(sp_tensor, scale_factor=3)
-
-            assert isinstance(output, SparseTensor)
-        except Exception:
-            pytest.skip("Upsample kernel failed")
+        assert isinstance(output, SparseTensor)

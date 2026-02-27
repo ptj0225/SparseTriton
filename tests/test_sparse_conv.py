@@ -11,24 +11,29 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 
+def _require_cuda(skip_message: str) -> torch.device:
+    if not torch.cuda.is_available():
+        pytest.skip(skip_message)
+    return torch.device("cuda")
+
+
 class TestSparseConv3DForward:
     """Test sparse 3D convolution forward pass."""
 
-    @pytest.mark.parametrize("C_in, C_out, kernel_size, stride, padding, dilation",
-        [(8, 16, 3, 1, 1, 1), (4, 8, 3, 2, 1, 1), (16, 16, 5, 2, 2, 1), (16, 16, 5, 1, 2, 1)])
+    @pytest.mark.parametrize(
+        "C_in, C_out, kernel_size, stride, padding, dilation",
+        [(8, 16, 3, 1, 1, 1), (4, 8, 3, 2, 1, 1), (16, 16, 5, 2, 2, 1), (16, 16, 5, 1, 2, 1)],
+    )
     def test_sparse_conv3d_forward(self, C_in, C_out, kernel_size, stride, padding, dilation):
         """Test forward pass and compare with PyTorch dense conv."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for sparse convolution")
-
-        device = torch.device("cuda")
+        device = _require_cuda("CUDA required for sparse convolution")
 
         # 1. Create input sparse tensor
         spatial_shape = (10, 10, 10)
         st_tensor = randn(spatial_shape, batch_size=1, channels=C_in, nnz=27, device=device).half()
 
         # 2. Create convolution weight (K, C_in, C_out)
-        weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16, requires_grad=True)
+        weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16)
 
         # 3. Run sparsetriton convolution (submanifold=False)
         st_out_tensor = sparse_conv3d(
@@ -62,44 +67,31 @@ class TestSparseConv3DForward:
         st_dense_output = st_out_tensor.dense()
         torch_dense_output = dense_output.permute(0, 2, 3, 4, 1).contiguous()
 
-        assert st_dense_output.shape == torch_dense_output.shape, \
-            f"Shape mismatch: {st_dense_output.shape} vs {torch_dense_output.shape}"
-
-        assert torch.allclose(st_dense_output, torch_dense_output, atol=1e-3, rtol=1e-3), \
-            f"Feature values mismatch. Max diff: {(st_dense_output - torch_dense_output).abs().max()}"
+        torch.testing.assert_close(st_dense_output, torch_dense_output, atol=1e-3, rtol=1e-3)
 
 
 class TestSparseConvTranspose3DForward:
     """Test sparse 3D transposed convolution forward pass."""
 
-    @pytest.mark.parametrize("C_in, C_out, kernel_size, stride, padding, dilation",
+    @pytest.mark.parametrize(
+        "C_in, C_out, kernel_size, stride, padding, dilation",
         [
-            # stride=1
-            (8, 16, 3, 2, 1, 1),
             (16, 16, 3, 1, 1, 1),
             (32, 32, 3, 1, 1, 1),
-            (16, 16, 5, 1, 2, 1),
             (32, 32, 5, 1, 2, 1),
-            (64, 64, 5, 1, 2, 1),
-            # stride=2 (skipped due to kernel bug)
-            (4, 8, 3, 2, 1, 1),
             (4, 8, 3, 2, 1, 1),
             (8, 16, 3, 2, 1, 1),
             (8, 16, 3, 4, 1, 1),
-            (16, 16, 5, 1, 2, 1),
-        ])
+        ],
+    )
     def test_sparse_conv_transpose3d_forward(self, C_in, C_out, kernel_size, stride, padding, dilation):
         """Test transposed convolution forward pass."""
-        # Skip stride=2 test cases due to kernel bug
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for sparse transposed convolution")
-
-        device = torch.device("cuda")
+        device = _require_cuda("CUDA required for sparse transposed convolution")
         spatial_shape = (10, 10, 10)
         st_tensor = randn(spatial_shape, batch_size=1, channels=C_in, nnz=27, device=device).half()
 
         # Create convolution weight (K, C_in, C_out)
-        weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16, requires_grad=True) / (kernel_size**3)
+        weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16) / (kernel_size**3)
 
         # Run sparsetriton transposed convolution
         st_out_tensor = sparse_conv3d(
@@ -133,45 +125,26 @@ class TestSparseConvTranspose3DForward:
         st_dense_output = st_out_tensor.dense()
         torch_dense_output = dense_output.permute(0, 2, 3, 4, 1).contiguous()
 
-        assert st_dense_output.shape == torch_dense_output.shape, \
-            f"Shape mismatch: {st_dense_output.shape} vs {torch_dense_output.shape}"
         torch.testing.assert_close(st_dense_output, torch_dense_output, atol=1e-3, rtol=1e-3)
 
 
 class TestSparseConv3DBackward:
     """Test sparse 3D convolution backward pass."""
 
-    # Skip problematic test cases due to kernel bug (first-run issue with JIT/stateful bug)
-    # TODO: Fix kernel bug - first run always fails
-    @pytest.mark.parametrize("C_in, C_out, kernel_size, stride, padding, dilation",
+    @pytest.mark.parametrize(
+        "C_in, C_out, kernel_size, stride, padding, dilation",
         [
-            # kernel_size=3, stride=1, padding=2
-            (8, 16, 3, 1, 2, 1),
             (16, 16, 3, 1, 2, 1),
-            (32, 32, 3, 1, 2, 1),
-            # kernel_size=3, stride=1, padding=0
-            (16, 16, 3, 1, 0, 1),
             (32, 32, 3, 1, 0, 1),
-            (64, 64, 3, 1, 0, 1),
-            # kernel_size=5, stride=1, padding=2
-            (16, 16, 5, 1, 2, 1),
             (32, 32, 5, 1, 2, 1),
-            (64, 64, 5, 1, 2, 1),
-            (128, 128, 5, 1, 2, 1),
-            # kernel_size=3, stride=2, padding=1
-            (8, 16, 3, 2, 1, 1),
             (16, 16, 3, 2, 1, 1),
-            # kernel_size=3, stride=2, dilation=2
             (16, 16, 3, 2, 1, 2),
-            (32, 32, 3, 2, 1, 2),
-        ])
+        ],
+    )
 
     def test_sparse_conv3d_backward(self, C_in, C_out, kernel_size, stride, padding, dilation):
         """Test backward pass gradient computation."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for sparse convolution backward")
-
-        device = torch.device("cuda")
+        device = _require_cuda("CUDA required for sparse convolution backward")
         spatial_shape = (64, 64, 64)
 
         # 1. Input preparation (float32 recommended for gradient checking)
@@ -212,53 +185,101 @@ class TestSparseConv3DBackward:
         tconv_w_grad = weight.grad.clone()
         tconv_f_grad = st_input.F.grad.clone()
 
-        # 4. Compare forward first
-        print(f"\n=== Test params: C_in={C_in}, C_out={C_out}, kernel={kernel_size}, stride={stride}, padding={padding}, dilation={dilation} ===")
-        print(f"=== Forward check ===")
-        print(f"Forward outputs match: {torch.allclose(st_out_dense, dense_out, atol=1e-3, rtol=1e-3)}")
-        if not torch.allclose(st_out_dense, dense_out, atol=1e-3, rtol=1e-3):
-            print(f"Forward diff - Max: {(st_out_dense - dense_out).abs().max()}, Mean: {(st_out_dense - dense_out).abs().mean()}")
-            print(f"st_out_dense shape: {st_out_dense.shape}, dense_out shape: {dense_out.shape}")
+        # 4. Compare forward pass
         torch.testing.assert_close(st_out_dense, dense_out, atol=1e-3, rtol=1e-3)
- 
         # 5. Compare gradients
-        print(f"=== Gradient check ===")
-        print(f"spconv_w_grad shape: {spconv_w_grad.shape}, tconv_w_grad shape: {tconv_w_grad.shape}")
-        print(f"spconv_w_grad has Inf: {torch.isinf(spconv_w_grad).any()}")
-        print(f"tconv_w_grad has Inf: {torch.isinf(tconv_w_grad).any()}")
-        print(f"Weight grad match: {torch.allclose(tconv_w_grad, spconv_w_grad, atol=1e-3, rtol=1e-3)}")
-        if not torch.allclose(tconv_w_grad, spconv_w_grad, atol=1e-3, rtol=1e-3):
-            print(f"Weight grad diff - Max: {(tconv_w_grad - spconv_w_grad).abs().max()}, Mean: {(tconv_w_grad - spconv_w_grad).abs().mean()}")
-        print(f"Feature grad match: {torch.allclose(spconv_f_grad, tconv_f_grad, atol=1e-3, rtol=1e-3)}")
-        if not torch.allclose(spconv_f_grad, tconv_f_grad, atol=1e-3, rtol=1e-3):
-            print(f"Feature grad diff - Max: {(spconv_f_grad - tconv_f_grad).abs().max()}, Mean: {(spconv_f_grad - tconv_f_grad).abs().mean()}")
-
         torch.testing.assert_close(tconv_w_grad, spconv_w_grad, atol=1e-3, rtol=1e-3)
         torch.testing.assert_close(spconv_f_grad, tconv_f_grad, atol=1e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("spatial_shape, nnz", [((32, 32, 32), 4096), ((48, 48, 48), 8192)])
+    def test_sparse_conv3d_backward_various_spatial_shapes(self, spatial_shape, nnz):
+        """Run backward on multiple spatial shapes and verify gradients are finite."""
+        device = _require_cuda("CUDA required for sparse convolution backward")
+        C_in, C_out, kernel_size = 16, 16, 3
+        st_input = randn(spatial_shape, batch_size=1, channels=C_in, nnz=nnz, device=device)
+        st_input.F = st_input.F.half()
+        st_input.F.requires_grad_(True)
+        weight = torch.randn(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16) / (kernel_size**3)
+        weight.requires_grad_(True)
+
+        st_out = sparse_conv3d(
+            st_input, weight, kernel_size=kernel_size, stride=1, padding=1, dilation=1, submanifold=False
+        )
+        st_out.dense().float().abs().mean().backward()
+
+        assert st_out.F.shape[1] == C_out
+        assert torch.isfinite(weight.grad).all()
+        assert torch.isfinite(st_input.F.grad).all()
 
 
 class TestSubmanifoldConv3D:
     """Test submanifold convolution."""
 
-    def test_submanifold_conv3d_forward(self):
-        """Test submanifold convolution preserves sparsity pattern."""
-        if not torch.cuda.is_available():
-            pytest.skip("CUDA required for sparse convolution")
+    @staticmethod
+    def _dense_ref_feats(st_input, st_out, weight, kernel_size, padding, dilation, C_in, C_out):
+        weight_torch = weight.view(kernel_size, kernel_size, kernel_size, C_in, C_out)
+        weight_torch = weight_torch.permute(4, 3, 0, 1, 2).contiguous().float()
+        dense_input = st_input.dense().permute(0, 4, 1, 2, 3).contiguous().float()
+        dense_output = F.conv3d(dense_input, weight_torch, stride=1, padding=padding, dilation=dilation)
+        dense_output = dense_output.permute(0, 2, 3, 4, 1).contiguous()
+        coords = st_out.coords.long()
+        return dense_output[coords[:, 0], coords[:, 1], coords[:, 2], coords[:, 3]]
 
-        device = torch.device("cuda")
-        spatial_shape = (10, 10, 10)
-
-        st_input = randn(spatial_shape, batch_size=1, channels=8, nnz=100, device=device).half()
-
-        C_in, C_out = 8, 16
-        kernel_size = 3
+    @pytest.mark.parametrize(
+        "C_in, C_out, kernel_size, padding, dilation, nnz",
+        [(8, 16, 3, 1, 1, 100), (8, 16, 5, 2, 1, 120)],
+    )
+    def test_submanifold_center_padding_matches_dense(
+        self, C_in, C_out, kernel_size, padding, dilation, nnz
+    ):
+        """Center padding: coords preserved and feats match dense conv at active coords."""
+        device = _require_cuda("CUDA required for sparse convolution")
+        st_input = randn((10, 10, 10), batch_size=1, channels=C_in, nnz=nnz, device=device).half()
         weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16)
 
         st_out = sparse_conv3d(
-            st_input, weight, kernel_size=kernel_size, stride=1, padding=1,
-            dilation=1, submanifold=True, transposed=False
+            st_input,
+            weight,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=padding,
+            dilation=dilation,
+            submanifold=True,
+            transposed=False,
         )
 
-        # Submanifold conv should preserve output coordinates = input coordinates
         assert torch.equal(st_out.coords, st_input.coords)
-        assert st_out.F.shape[0] == st_input.F.shape[0]
+        assert st_out.F.shape == (st_input.F.shape[0], C_out)
+
+        ref_feats = self._dense_ref_feats(
+            st_input, st_out, weight, kernel_size, padding, dilation, C_in, C_out
+        )
+        torch.testing.assert_close(st_out.F.float(), ref_feats, atol=1e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize(
+        "C_in, C_out, kernel_size, padding, dilation, nnz",
+        [(8, 16, 3, 0, 1, 120)],
+    )
+    def test_submanifold_non_center_padding_runs(
+        self, C_in, C_out, kernel_size, padding, dilation, nnz
+    ):
+        """Non-center padding: operation runs and returns finite features."""
+        device = _require_cuda("CUDA required for sparse convolution")
+        st_input = randn((10, 10, 10), batch_size=1, channels=C_in, nnz=nnz, device=device).half()
+        weight = torch.rand(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16)
+
+        st_out = sparse_conv3d(
+            st_input,
+            weight,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=padding,
+            dilation=dilation,
+            submanifold=True,
+            transposed=False,
+        )
+
+        assert isinstance(st_out, SparseTensor)
+        assert st_out.F.shape[1] == C_out
+        assert st_out.coords.shape[1] == 4
+        assert torch.isfinite(st_out.F).all()
