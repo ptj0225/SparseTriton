@@ -15,7 +15,7 @@ class TestSparseConv3DForward:
     """Test sparse 3D convolution forward pass."""
 
     @pytest.mark.parametrize("C_in, C_out, kernel_size, stride, padding, dilation",
-        [(8, 16, 3, 1, 1, 1), (4, 8, 3, 2, 1, 1), (16, 16, 5, 1, 2, 1)])
+        [(8, 16, 3, 1, 1, 1), (4, 8, 3, 2, 1, 1), (16, 16, 5, 2, 2, 1), (16, 16, 5, 1, 2, 1)])
     def test_sparse_conv3d_forward(self, C_in, C_out, kernel_size, stride, padding, dilation):
         """Test forward pass and compare with PyTorch dense conv."""
         if not torch.cuda.is_available():

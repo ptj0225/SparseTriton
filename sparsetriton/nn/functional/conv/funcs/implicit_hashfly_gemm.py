@@ -20,6 +20,7 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
     hash_table_keys_ptr, hash_table_vals_ptr,
     table_size,
     N, C_in, C_out,
+    lookup_stride,
     spatial_shape_x, spatial_shape_y, spatial_shape_z,
     BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_C_OUT: tl.constexpr,
     BLOCK_SIZE_C_IN: tl.constexpr, K_VOL: tl.constexpr,
@@ -55,9 +56,9 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
         dx = tl.load(k_offsets_ptr + k * 3 )
         dy = tl.load(k_offsets_ptr + k * 3 + 1)
         dz = tl.load(k_offsets_ptr + k * 3 + 2)
-        curr_x = x - dx  # (BLOCK_SIZE_N,)
-        curr_y = y - dy  # (BLOCK_SIZE_N,)
-        curr_z = z - dz  # (BLOCK_SIZE_N,)
+        curr_x = x * lookup_stride - dx  # (BLOCK_SIZE_N,)
+        curr_y = y * lookup_stride - dy  # (BLOCK_SIZE_N,)
+        curr_z = z * lookup_stride - dz  # (BLOCK_SIZE_N,)
         hashes = hash_coords_kernel(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
         keys = hash_coords_kernel2(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
         in_indices = query_hash_table_impl(
@@ -112,6 +113,7 @@ def implicit_gemm_bwd_feat_kernel(
     hash_table_keys_ptr, hash_table_vals_ptr,
     table_size,
     N, C_in, C_out,
+    lookup_stride,
     spatial_shape_x, spatial_shape_y, spatial_shape_z,
     BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_C_IN: tl.constexpr,
     BLOCK_SIZE_C_OUT: tl.constexpr, K_VOL: tl.constexpr,
@@ -149,9 +151,9 @@ def implicit_gemm_bwd_feat_kernel(
         dy = tl.load(k_offsets_ptr + k * 3 + 1)
         dz = tl.load(k_offsets_ptr + k * 3 + 2)
         
-        curr_x = x - dx  # (BLOCK_SIZE_N,)
-        curr_y = y - dy  # (BLOCK_SIZE_N,)
-        curr_z = z - dz  # (BLOCK_SIZE_N,)
+        curr_x = x * lookup_stride - dx  # (BLOCK_SIZE_N,)
+        curr_y = y * lookup_stride - dy  # (BLOCK_SIZE_N,)
+        curr_z = z * lookup_stride - dz  # (BLOCK_SIZE_N,)
         
         hashes = hash_coords_kernel(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
         keys = hash_coords_kernel2(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
@@ -202,6 +204,7 @@ def implicit_gemm_bwd_weight_kernel(
     hash_table_keys_ptr, hash_table_vals_ptr,
     table_size,
     N, C_in, C_out,
+    lookup_stride,
     spatial_shape_x, spatial_shape_y, spatial_shape_z,
     BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_C_IN: tl.constexpr,
     BLOCK_SIZE_C_OUT: tl.constexpr, K_VOL: tl.constexpr, 
@@ -246,9 +249,9 @@ def implicit_gemm_bwd_weight_kernel(
     y = tl.load(coords_ptr + off_n * 4 + 2, mask=mask_n, other=0)  # (BLOCK_SIZE_N,)
     z = tl.load(coords_ptr + off_n * 4 + 3, mask=mask_n, other=0)  # (BLOCK_SIZE_N,)
     
-    curr_x = x - dx  # (BLOCK_SIZE_N,)
-    curr_y = y - dy  # (BLOCK_SIZE_N,)
-    curr_z = z - dz  # (BLOCK_SIZE_N,)
+    curr_x = x * lookup_stride - dx  # (BLOCK_SIZE_N,)
+    curr_y = y * lookup_stride - dy  # (BLOCK_SIZE_N,)
+    curr_z = z * lookup_stride - dz  # (BLOCK_SIZE_N,)
     
     hashes = hash_coords_kernel(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
     keys = hash_coords_kernel2(b, curr_x, curr_y, curr_z)  # (BLOCK_SIZE_N,)
@@ -281,7 +284,7 @@ def implicit_gemm_bwd_weight_kernel(
 
 class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, features, weights, coords, kernel_offsets, hash_table_keys, hash_table_vals, spatial_shape):
+    def forward(ctx, features, weights, coords, kernel_offsets, hash_table_keys, hash_table_vals, spatial_shape, lookup_stride):
         """
         Args:
             features: (N_in, C_in) 입력 특징 텐서
@@ -324,6 +327,7 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
             N=N_out,
             C_in=C_in,
             C_out=C_out,
+            lookup_stride=lookup_stride,
             spatial_shape_x=spatial_shape[0],
             spatial_shape_y=spatial_shape[1],
             spatial_shape_z=spatial_shape[2],
@@ -336,6 +340,7 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
         ctx.C_out = C_out
         ctx.N_out = N_out
         ctx.spatial_shape = spatial_shape
+        ctx.lookup_stride = lookup_stride
         
         return out_features
 
@@ -368,6 +373,7 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
             hash_table_vals_ptr=hash_table_vals,
             table_size=len(hash_table_keys),
             N=N_out, C_in=C_in, C_out=C_out,
+            lookup_stride=ctx.lookup_stride,
             spatial_shape_x=ctx.spatial_shape[0],
             spatial_shape_y=ctx.spatial_shape[1],
             spatial_shape_z=ctx.spatial_shape[2],
@@ -391,10 +397,11 @@ class ConvHashOnTheFlyImplicitGEMM(torch.autograd.Function):
             hash_table_vals_ptr=hash_table_vals,
             table_size=len(hash_table_keys),
             N=N_out, C_in=C_in, C_out=C_out,
+            lookup_stride=ctx.lookup_stride,
             spatial_shape_x=ctx.spatial_shape[0],
             spatial_shape_y=ctx.spatial_shape[1],
             spatial_shape_z=ctx.spatial_shape[2],
             K_VOL=K,
         )
         
-        return grad_input, grad_weights, None, None, None, None, None
+        return grad_input, grad_weights, None, None, None, None, None, None

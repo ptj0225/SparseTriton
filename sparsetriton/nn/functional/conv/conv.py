@@ -109,6 +109,7 @@ def sparse_conv3d(
             in_hash_table.table_keys,
             in_hash_table.table_values,
             spatial_shape,
+            1,
         )
         
     else:
@@ -120,6 +121,7 @@ def sparse_conv3d(
             in_hash_table.table_keys,
             in_hash_table.table_values,
             tensor.spatial_shape,
+            s,
         )
 
     if bias is not None:
