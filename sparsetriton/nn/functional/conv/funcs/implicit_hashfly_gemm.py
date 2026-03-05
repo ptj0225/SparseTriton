@@ -3,6 +3,37 @@ import triton.language as tl
 import torch
 from sparsetriton.utils.hash import query_hash_table_impl, hash_coords_kernel, hash_coords_kernel2
 
+_ROCM_MODE = torch.version.hip is not None
+
+_BWD_FEAT_CONFIGS = [
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
+] if _ROCM_MODE else [
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 32, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 32, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 64}, num_warps=8, num_stages=3),
+]
+
+_BWD_WEIGHT_CONFIGS = [
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
+] if _ROCM_MODE else [
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 32, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 64}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 64}, num_warps=8, num_stages=3),
+]
+
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_OUT': 16, 'BLOCK_SIZE_C_IN': 16}, num_warps=4, num_stages=2),
@@ -104,18 +135,7 @@ def implicit_gemm_hash_on_fly_fwd_kernel(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 32, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 32, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 64}, num_warps=8, num_stages=3),
-    ],
+    configs=_BWD_FEAT_CONFIGS,
     key=['C_in', 'C_out', "K_VOL"],
     reset_to_zero=['d_features_ptr'],
 )
@@ -155,10 +175,10 @@ def implicit_gemm_bwd_feat_kernel(
     mask_n = off_n < N  # (BLOCK_SIZE_N,)
     mask_cin = off_cin < C_in  # (BLOCK_SIZE_C_IN,)
 
-    b = tl.load(coords_ptr + off_n * 4, mask=mask_n)  # (BLOCK_SIZE_N,)
-    x = tl.load(coords_ptr + off_n * 4 + 1, mask=mask_n)  # (BLOCK_SIZE_N,)
-    y = tl.load(coords_ptr + off_n * 4 + 2, mask=mask_n)  # (BLOCK_SIZE_N,)
-    z = tl.load(coords_ptr + off_n * 4 + 3, mask=mask_n)  # (BLOCK_SIZE_N,)
+    b = tl.load(coords_ptr + off_n * 4, mask=mask_n, other=0)  # (BLOCK_SIZE_N,)
+    x = tl.load(coords_ptr + off_n * 4 + 1, mask=mask_n, other=0)  # (BLOCK_SIZE_N,)
+    y = tl.load(coords_ptr + off_n * 4 + 2, mask=mask_n, other=0)  # (BLOCK_SIZE_N,)
+    z = tl.load(coords_ptr + off_n * 4 + 3, mask=mask_n, other=0)  # (BLOCK_SIZE_N,)
 
     for k in range(K_VOL):
         dx = tl.load(k_offsets_ptr + k * 3)
@@ -197,21 +217,13 @@ def implicit_gemm_bwd_feat_kernel(
             )  
             acc = tl.dot(do_tile, tl.trans(w_tile), acc=acc)
             
-        target_ptrs = d_features_ptr + in_indices[:, None] * C_in + off_cin[None, :]  # (BLOCK_SIZE_N, BLOCK_SIZE_C_IN)
+        # Keep pointer math in-bounds for masked-out lanes on ROCm.
+        in_indices_safe = tl.where(in_indices >= 0, in_indices, 0)
+        target_ptrs = d_features_ptr + in_indices_safe[:, None] * C_in + off_cin[None, :]  # (BLOCK_SIZE_N, BLOCK_SIZE_C_IN)
         tl.atomic_add(target_ptrs, acc.to(d_out_ptr.dtype.element_ty), mask=valid_mask[:, None] & mask_cin[None, :])
     
 @triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 32, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 16, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 64}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_C_IN': 64, 'BLOCK_SIZE_C_OUT': 64}, num_warps=8, num_stages=3),
-    ],
+    configs=_BWD_WEIGHT_CONFIGS,
     key=['C_in', 'C_out', "K_VOL"],
     reset_to_zero=['d_weights_ptr'],
 )

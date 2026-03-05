@@ -346,6 +346,32 @@ class SparseTensor:
             f")"
         )
 
+    def __add__(self, other: Union["SparseTensor", torch.Tensor]) -> "SparseTensor":
+        """Element-wise addition of sparse tensors.
+
+        Args:
+            other: Another SparseTensor or torch.Tensor
+
+        Returns:
+            SparseTensor: Sum of the tensors
+
+        Raises:
+            NotImplementedError: If adding a dense tensor
+
+        Example:
+            >>> import torch
+            >>> from sparsetriton import SparseTensor, randn
+            >>> sp1 = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device="cpu")
+            >>> sp2 = randn((16, 16, 16), batch_size=2, nnz=10, channels=4, device="cpu")
+            >>> result = sp1 + sp2
+        """
+        if isinstance(other, SparseTensor):
+            # For now, assume both have the same coordinates (residual connection)
+            # In practice, we might need to merge coordinates
+            return self.replace(self.feats + other.feats)
+        else:
+            raise NotImplementedError("Addition with dense tensors not yet supported")
+
 
 def randn(
     spatial_shape: Tuple[int, ...],
@@ -421,6 +447,6 @@ def randn(
     coords = all_coords[0][:nnz].contiguous()
 
     # Generate random features
-    feats = torch.randn(nnz, channels, device=device, dtype=dtype).contiguous()
+    feats = torch.randn(nnz, channels, device=device, dtype=dtype, requires_grad=True).contiguous()
 
     return SparseTensor(feats, coords, spatial_shape=spatial_shape)
