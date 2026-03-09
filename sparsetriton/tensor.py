@@ -27,12 +27,15 @@ __all__ = ["SparseTensor", "randn"]
 class TensorCache:
     """Cache for storing tensor-related computed data.
 
-    This class stores intermediate computations like kernel maps (kmaps)
-    and hash tables to avoid redundant calculations.
+    This class stores intermediate computations like kernel maps (kmaps),
+    hash tables, and precomputed neighbor indices to avoid redundant calculations.
 
     Attributes:
         kmaps: Dictionary storing kernel mapping tensors
         hashtable: Cached hash table for coordinate lookups
+        neighbor_indices: Dictionary storing precomputed neighbor indices
+                         Key: (kernel_size, stride, dilation, submanifold, transposed)
+                         Value: (out_coords, neighbor_indices, new_spatial_shape)
 
     Example:
         >>> from sparsetriton.tensor import TensorCache
@@ -46,6 +49,7 @@ class TensorCache:
         """Initialize an empty TensorCache."""
         self.kmaps: Dict[Tuple[Any, ...], Any] = {}
         self.hashtable: Optional[HashTable] = None
+        self.neighbor_indices: Dict[Tuple[Any, ...], Tuple[torch.Tensor, torch.Tensor, Tuple]] = {}
 
 
 class SparseTensor:

@@ -23,16 +23,20 @@ class ConvAlgo(Enum):
 
     Attributes:
         ImplicitHashMapGEMM: Implicit Hash Map based GEMM algorithm
-        ImplicitHashFlyGEMM: Implicit Hash Fly based GEMM algorithm (default, usually faster)
+        ImplicitHashFlyGEMM: Implicit Hash Fly based GEMM algorithm (on-the-fly hash lookup)
+        PrecomputedNeighborGEMM: Pre-computed neighbor indices GEMM algorithm (faster, more memory)
+        Im2ColGEMM: Im2col + Dense GEMM algorithm (fastest, most memory, uses cuBLAS)
 
     Example:
         >>> from sparsetriton.config import ConvAlgo
-        >>> algo = ConvAlgo.ImplicitHashFlyGEMM
+        >>> algo = ConvAlgo.Im2ColGEMM
         >>> algo.value
-        'Implicit_hashfly_gemm'
+        'Im2col_gemm'
     """
     ImplicitHashMapGEMM = "Implicit_hashmap_gemm"
     ImplicitHashFlyGEMM = "Implicit_hashfly_gemm"
+    PrecomputedNeighborGEMM = "Precomputed_neighbor_gemm"
+    Im2ColGEMM = "Im2col_gemm"
 
 
 _STATE: dict = {

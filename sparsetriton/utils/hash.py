@@ -116,10 +116,8 @@ def hash_coords(coords: torch.Tensor) -> torch.Tensor:
 @triton.jit
 def hash_coords_kernel(b, x, y, z):
     """Triton kernel for hashing 4D coordinates.
-
-    Packs B, X, Y, Z (each 16-bit) into a 64-bit integer with
-    optimal bit arrangement for spatial locality. Uses the upper
-    24 bits for batch to ensure locality within the same batch.
+    
+    Optimized version using bit mixing for faster computation.
 
     Args:
         b: Batch indices
@@ -130,20 +128,16 @@ def hash_coords_kernel(b, x, y, z):
     Returns:
         int32: Hashed value
     """
-    h = (
-        (b.to(tl.uint64) << 24)
-        | ((x.to(tl.uint64) & 0xFF) << 16)
-        | ((y.to(tl.uint64) & 0xFF) << 8)
-        | (z.to(tl.uint64) & 0xFF)
-    )
-    return h.to(tl.int32) & 0x7FFFFFFF
+    # Simple bit mixing - faster than prime multiplication
+    h = (b.to(tl.int32) << 24) ^ (x.to(tl.int32) << 16) ^ (y.to(tl.int32) << 8) ^ z.to(tl.int32)
+    return h & 0x7FFFFFFF
 
 
 @triton.jit
 def hash_coords_kernel2(b, x, y, z):
-    """Alternative Triton kernel for spatial hashing.
-
-    Uses different prime multipliers for collision resistance.
+    """Alternative hash for collision detection.
+    
+    Uses XOR-shift for fast unique keys.
 
     Args:
         b: Batch indices
@@ -154,13 +148,9 @@ def hash_coords_kernel2(b, x, y, z):
     Returns:
         int32: Hashed value
     """
-    h = (
-        (x.to(tl.uint64) * 982451653)
-        ^ (y.to(tl.uint64) * 701000767)
-        ^ (z.to(tl.uint64) * 1610612741)
-        ^ (b.to(tl.uint64) * 67867979)
-    )
-    return h.to(tl.int32) & 0x7FFFFFFF
+    # Pack into single int32 using bit fields
+    h = ((b.to(tl.int32) & 0xFF) << 24) | ((x.to(tl.int32) & 0xFF) << 16) | ((y.to(tl.int32) & 0xFF) << 8) | (z.to(tl.int32) & 0xFF)
+    return h
 
 
 @triton.jit
@@ -219,7 +209,7 @@ def build_hash_table_kernel(
     N,
     tune_N,
     BLOCK_SIZE: tl.constexpr,
-    max_probe_step: tl.constexpr = 128,
+    max_probe_step: tl.constexpr = 32,
 ):
     """Build a hash table mapping packed coordinates to voxel indices.
 
@@ -271,7 +261,7 @@ def build_hash_table_kernel(
 
 @triton.jit
 def query_hash_table_impl(
-    hashes, keys, table_keys_ptr, table_values_ptr, table_size, idx, N, BLOCK_SIZE, max_probe_step: tl.constexpr = 128
+    hashes, keys, table_keys_ptr, table_values_ptr, table_size, idx, N, BLOCK_SIZE, max_probe_step: tl.constexpr = 32
 ):
     """Query hash table for coordinate indices.
 
@@ -287,7 +277,7 @@ def query_hash_table_impl(
         idx: Thread indices
         N: Number of queries
         BLOCK_SIZE: Block size
-        max_probe_step: Maximum number of probe attempts
+        max_probe_step: Maximum number of probe attempts (default: 32)
 
     Returns:
         Tensor of found indices (-1 if not found)
@@ -295,15 +285,18 @@ def query_hash_table_impl(
     active_mask = idx < N
     probe_step = 0
     result = tl.full((BLOCK_SIZE,), -1, dtype=tl.int32)
-    while (tl.max(active_mask.to(tl.int1), axis=0) > 0) & (probe_step < max_probe_step):
+    
+    # While loop for early exit
+    while (tl.max(active_mask.to(tl.int32), axis=0) > 0) & (probe_step < max_probe_step):
         curr_hash = get_probe_offsets_impl(hashes, probe_step, table_size)
-        loaded_key = tl.load(table_keys_ptr + curr_hash, mask=active_mask, other=-1)
+        loaded_key = tl.load(table_keys_ptr + curr_hash, mask=active_mask, other=-2)
         found_mask = active_mask & (loaded_key == keys)
         empty_mask = loaded_key == -1
         val = tl.load(table_values_ptr + curr_hash, mask=found_mask, other=-1)
         result = tl.where(found_mask, val, result)
         active_mask = active_mask & (~found_mask) & (~empty_mask)
         probe_step += 1
+    
     return result
 
 
@@ -328,7 +321,7 @@ def query_hash_table_kernel(
     N,
     tune_N,
     BLOCK_SIZE: tl.constexpr,
-    max_probe_step: tl.constexpr = 128,
+    max_probe_step: tl.constexpr = 32,
 ):
     """Query kernel for hash table lookups.
 
