@@ -209,7 +209,7 @@ def build_hash_table_kernel(
     N,
     tune_N,
     BLOCK_SIZE: tl.constexpr,
-    max_probe_step: tl.constexpr = 32,
+    max_probe_step: tl.constexpr = 128,
 ):
     """Build a hash table mapping packed coordinates to voxel indices.
 
@@ -261,7 +261,7 @@ def build_hash_table_kernel(
 
 @triton.jit
 def query_hash_table_impl(
-    hashes, keys, table_keys_ptr, table_values_ptr, table_size, idx, N, BLOCK_SIZE, max_probe_step: tl.constexpr = 32
+    hashes, keys, table_keys_ptr, table_values_ptr, table_size, idx, N, BLOCK_SIZE, max_probe_step: tl.constexpr = 128
 ):
     """Query hash table for coordinate indices.
 
@@ -321,7 +321,7 @@ def query_hash_table_kernel(
     N,
     tune_N,
     BLOCK_SIZE: tl.constexpr,
-    max_probe_step: tl.constexpr = 32,
+    max_probe_step: tl.constexpr = 128,
 ):
     """Query kernel for hash table lookups.
 

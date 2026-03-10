@@ -15,6 +15,8 @@ def compute_neighbor_indices(
     kernel_offsets: torch.Tensor,
     spatial_shape: Tuple[int, int, int],
     stride: int,
+    padding: int = 0,
+    dilation: int = 1,
 ) -> torch.Tensor:
     """Compute neighbor indices for each output coordinate.
     
@@ -23,9 +25,11 @@ def compute_neighbor_indices(
     Args:
         in_hash_table: Hash table mapping input coordinates to indices
         out_coords: (N_out, 4) output coordinates [batch, x, y, z]
-        kernel_offsets: (K, 3) kernel offsets
+        kernel_offsets: (K, 3) kernel offsets (already includes padding/dilation transform)
         spatial_shape: (X, Y, Z) spatial dimensions
         stride: Convolution stride
+        padding: Convolution padding (unused - already in kernel_offsets)
+        dilation: Convolution dilation (unused - already in kernel_offsets)
     
     Returns:
         neighbor_indices: (N_out, K) tensor of input indices (-1 if not found)
@@ -40,7 +44,8 @@ def compute_neighbor_indices(
     # Expand kernel_offsets: (1, K, 3) -> (N_out, K, 3)
     kernel_offsets_expanded = kernel_offsets.unsqueeze(0).expand(N_out, -1, -1)  # (N_out, K, 3)
     
-    # Compute neighbor coords: (N_out, K, 4)
+    # Compute neighbor coords: input_coord = output_coord * stride - kernel_offset
+    # (matches ImplicitHashFlyGEMM: curr_x = x * lookup_stride - dx)
     neighbor_coords = out_coords_expanded.clone()
     neighbor_coords[:, :, 1] = out_coords_expanded[:, :, 1] * stride - kernel_offsets_expanded[:, :, 0]
     neighbor_coords[:, :, 2] = out_coords_expanded[:, :, 2] * stride - kernel_offsets_expanded[:, :, 1]
@@ -166,7 +171,7 @@ def sparse_conv3d(
     
     if algo == ConvAlgo.PrecomputedNeighborGEMM:
         # Pre-compute neighbor indices with caching
-        cache_key = (k_size, s, d, submanifold, transposed)
+        cache_key = (k_size, s, p, d, submanifold, transposed)
         
         if cache_key in tensor._cache.neighbor_indices:
             # Use cached neighbor indices
@@ -179,7 +184,8 @@ def sparse_conv3d(
                 spatial_shape_for_lookup = tensor.spatial_shape
             
             neighbor_indices = compute_neighbor_indices(
-                in_hash_table, out_coords, kernel_offsets, spatial_shape_for_lookup, s if not transposed else 1
+                in_hash_table, out_coords, kernel_offsets, spatial_shape_for_lookup, 
+                s if not transposed else 1, p, d
             )
             
             # Cache for future use

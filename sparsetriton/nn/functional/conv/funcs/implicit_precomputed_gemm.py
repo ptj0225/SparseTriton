@@ -129,6 +129,7 @@ def precomputed_fwd_kernel(
 @triton.autotune(
     configs=_BWD_FEAT_CONFIGS,
     key=['C_in', 'C_out'],
+    reset_to_zero=['d_features_ptr'],
 )
 @triton.jit
 def precomputed_bwd_feat_kernel(
@@ -179,6 +180,7 @@ def precomputed_bwd_feat_kernel(
 @triton.autotune(
     configs=_BWD_WEIGHT_CONFIGS,
     key=['C_in', 'C_out'],
+    reset_to_zero=['d_weights_ptr'],
 )
 @triton.jit
 def precomputed_bwd_weight_kernel(

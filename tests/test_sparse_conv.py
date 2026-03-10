@@ -150,6 +150,7 @@ class TestSparseConv3DBackward:
         # 1. Input preparation (float32 recommended for gradient checking)
         st_input = randn(spatial_shape, batch_size=1, channels=C_in, nnz=32**3, device=device)
         st_input.F = st_input.F.half()
+        st_input.F.retain_grad()  # Required for non-leaf tensors
         st_input.F.requires_grad_(True)
 
         # Weight
@@ -198,6 +199,7 @@ class TestSparseConv3DBackward:
         C_in, C_out, kernel_size = 16, 16, 3
         st_input = randn(spatial_shape, batch_size=1, channels=C_in, nnz=nnz, device=device)
         st_input.F = st_input.F.half()
+        st_input.F.retain_grad()  # Required for non-leaf tensors
         st_input.F.requires_grad_(True)
         weight = torch.randn(kernel_size**3, C_in, C_out, device=device, dtype=torch.float16) / (kernel_size**3)
         weight.requires_grad_(True)
