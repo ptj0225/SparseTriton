@@ -1,53 +1,88 @@
-# Triton-based 3D Sparse Convolution
+# SparseTriton
 
-A high-performance, **hardware-agnostic** 3D Sparse Convolution library implemented purely in **Triton**. This project aims to provide a seamless `torch.nn` compatible interface that runs on any device supported by the Triton compiler (NVIDIA, AMD, etc.), eliminating the dependency on proprietary CUDA/C++ extensions.
+A high-performance, **hardware-agnostic** 3D Sparse Convolution library implemented purely in **Triton**. Provides a `torch.nn` compatible interface that runs on any device supported by the Triton compiler (NVIDIA, AMD ROCm), eliminating the dependency on proprietary CUDA/C++ extensions.
 
-## 🌟 Key Objectives
-* **Vendor Agnostic**: Zero CUDA C++ code. Fully compatible with NVIDIA and AMD (ROCm) via Triton.
-* **Memory Efficiency**: Utilizes sparse data structures to handle large-scale 3D point clouds or medical volumes.
-* **Performance**: Highly optimized kernels for Gather-GEMM-Scatter operations.
+## Features
 
----
+- **Submanifold Sparse Convolution** — Preserves input sparsity patterns for deep architectures
+- **Standard Sparse Convolution** — Supports stride, padding, and dilation for downsampling
+- **Transposed Sparse Convolution** — Upsampling with stride support
+- **GPU Hash Table** — Parallel hash table with Triton kernels for coordinate lookup
+- **Autograd Support** — Full backward pass for end-to-end training
+- **torch.nn Compatible Modules** — Drop-in replacements: `SparseConv3D`, `SubMConv3D`, `SparseBatchNorm`, etc.
 
-## 🚧 Work in Progress
-This project is currently under active development. While core functionalities are implemented, some features may be unstable, undocumented, or subject to change. Performance optimizations and comprehensive testing are ongoing. Your contributions and feedback are highly welcome!
+## Installation
 
----
+```bash
+pip install -e .
+```
 
-## 🚀 Features
-* **Submanifold Sparse Convolution**: Preserves input sparsity patterns for deep architectures.
-* **Standard Sparse Convolution**: Supports stride and padding for downsampling.
-* **GPU-based Rule Generation**: Fast index mapping and rulebook generation using Triton-based hashing.
-* **Autograd Support**: Full backward pass implementation for end-to-end training.
+Requires Python >= 3.9, PyTorch >= 2.1, and Triton >= 2.1.
 
----
+## Quick Start
 
-## 🛠 Architecture
+```python
+import torch
+from sparsetriton import SparseTensor, randn
+from sparsetriton.nn.modules import SubMConv3D, SparseConv3D, SparseBatchNorm, ReLU
 
-1.  **Coordinate Hashing**: Map 3D coordinates to linear indices using a parallel hash table.
-2.  **Rulebook Generation**: Identify active neighbor pairs for each kernel offset.
-3.  **Gather-GEMM-Scatter**:
-    * **Gather**: Collect features based on the rulebook.
-    * **GEMM**: Perform matrix multiplication using Triton's fused kernels.
-    * **Scatter**: Distribute results back to the output sparse tensor.
+# Create a random sparse tensor
+sp = randn(spatial_shape=(64, 64, 64), batch_size=2, nnz=4096, channels=16, device="cuda")
 
----
+# Build a sparse conv network
+conv1 = SubMConv3D(16, 32, kernel_size=3).cuda()
+conv2 = SparseConv3D(32, 64, kernel_size=3, stride=2).cuda()
+bn = SparseBatchNorm(32).cuda()
+relu = ReLU()
 
-## 📋 TODO
+# Forward pass
+x = relu(bn(conv1(sp)))
+out = conv2(x)
+```
 
-### Known Issues
-- [ ] Backward pass weight gradient incorrect (99.5% mismatch) - `DEBUG_SUMMARY.md`
-- [ ] Transposed convolution forward fails for stride=2 cases
-- [ ] Pooling operations fail on CPU (atomic operations not supported)
+## Architecture
 
-### CPU Support
-- [ ] CPU implementation or fallback (many tests skipped on CPU)
+Two convolution algorithms are available:
 
-### Performance Optimization
-- [ ] Autotuner config tuning (C_in=1, 64 show issues)
-- [ ] Memory efficiency for large-scale point clouds
+| Algorithm | Description | Use Case |
+|---|---|---|
+| `PrecomputedNeighborGEMM` | Pre-computes neighbor indices, then runs fused GEMM kernel | Default, best performance |
+| `ImplicitHashFlyGEMM` | On-the-fly hash lookup inside the GEMM kernel | Lower memory, no precomputation |
 
-### Features
-- [ ] More activation functions
-- [ ] Batch normalization for CPU
-- [ ] Documentation & API reference
+```python
+from sparsetriton.config import set_conv_algo, ConvAlgo
+
+set_conv_algo(ConvAlgo.PrecomputedNeighborGEMM)  # default
+set_conv_algo(ConvAlgo.ImplicitHashFlyGEMM)
+```
+
+## Modules
+
+| Module | Description |
+|---|---|
+| `SparseConv3D` | Standard sparse 3D convolution (stride, padding, dilation) |
+| `SubMConv3D` | Submanifold sparse convolution (preserves sparsity) |
+| `SparseConvTransposed3D` | Transposed sparse convolution |
+| `SparseLinear` | Linear layer for sparse features |
+| `SparseBatchNorm` | Batch normalization with per-batch statistics |
+| `SparseLayerNorm` | Layer normalization |
+| `ReLU`, `LeakyReLU`, `SiLU`, `GELU`, `Sigmoid`, `Tanh` | Activations |
+| `SparsePooling` | Max / Average pooling |
+| `SparseUpsample` | Nearest-neighbor upsampling |
+| `SparseDownsample` | Downsampling via pooling |
+
+## Testing
+
+```bash
+pytest tests/ -v
+```
+
+## Known Limitations
+
+- **Max pooling on CPU**: Triton atomic operations are not supported on CPU
+- **Coordinate range**: Coordinates should fit within `int16` range (recommended). The config can be changed via `set_coords_dtype(torch.int32)`
+- **Triton TF32 precision**: `tl.dot` internally uses TF32, resulting in ~0.001 relative error in forward/backward compared to dense PyTorch convolutions
+
+## License
+
+MIT

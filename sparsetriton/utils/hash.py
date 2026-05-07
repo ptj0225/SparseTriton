@@ -137,7 +137,7 @@ def hash_coords_kernel(b, x, y, z):
 def hash_coords_kernel2(b, x, y, z):
     """Alternative hash for collision detection.
     
-    Uses XOR-shift for fast unique keys.
+    Uses full-range bit mixing instead of 8-bit truncation.
 
     Args:
         b: Batch indices
@@ -148,9 +148,8 @@ def hash_coords_kernel2(b, x, y, z):
     Returns:
         int32: Hashed value
     """
-    # Pack into single int32 using bit fields
-    h = ((b.to(tl.int32) & 0xFF) << 24) | ((x.to(tl.int32) & 0xFF) << 16) | ((y.to(tl.int32) & 0xFF) << 8) | (z.to(tl.int32) & 0xFF)
-    return h
+    h = (b.to(tl.int32) * 1000003) ^ (x.to(tl.int32) * 100003) ^ (y.to(tl.int32) * 10007) ^ z.to(tl.int32)
+    return h & 0x7FFFFFFF
 
 
 @triton.jit

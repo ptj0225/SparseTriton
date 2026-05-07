@@ -22,26 +22,22 @@ class ConvAlgo(Enum):
     """Enumeration of available sparse convolution algorithms.
 
     Attributes:
-        ImplicitHashMapGEMM: Implicit Hash Map based GEMM algorithm
         ImplicitHashFlyGEMM: Implicit Hash Fly based GEMM algorithm (on-the-fly hash lookup)
         PrecomputedNeighborGEMM: Pre-computed neighbor indices GEMM algorithm (faster, more memory)
-        Im2ColGEMM: Im2col + Dense GEMM algorithm (fastest, most memory, uses cuBLAS)
 
     Example:
         >>> from sparsetriton.config import ConvAlgo
-        >>> algo = ConvAlgo.Im2ColGEMM
+        >>> algo = ConvAlgo.PrecomputedNeighborGEMM
         >>> algo.value
-        'Im2col_gemm'
+        'Precomputed_neighbor_gemm'
     """
-    ImplicitHashMapGEMM = "Implicit_hashmap_gemm"
     ImplicitHashFlyGEMM = "Implicit_hashfly_gemm"
     PrecomputedNeighborGEMM = "Precomputed_neighbor_gemm"
-    Im2ColGEMM = "Im2col_gemm"
 
 
 _STATE: dict = {
     "coords_dtype": torch.int16,
-    "algo": ConvAlgo.ImplicitHashFlyGEMM,
+    "algo": ConvAlgo.PrecomputedNeighborGEMM,
     "h_tbl_factor": 1.5,
     "h_tbl_max_probe_n": 16,
 }

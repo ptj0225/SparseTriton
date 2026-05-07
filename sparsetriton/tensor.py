@@ -131,7 +131,8 @@ class SparseTensor:
             else:
                 self.batch_size = 0
         else:
-            assert batch_size > self.coords[:, 0].max().item(), f"batch_size {batch_size} must be > max batch index {self.coords[:, 0].max().item()}"
+            if self.coords.shape[0] > 0:
+                assert batch_size > self.coords[:, 0].max().item(), f"batch_size {batch_size} must be > max batch index {self.coords[:, 0].max().item()}"
             self.batch_size = batch_size
 
         self._cache = TensorCache() if cache is None else cache

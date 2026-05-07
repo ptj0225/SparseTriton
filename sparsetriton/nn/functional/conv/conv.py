@@ -2,9 +2,9 @@ import torch
 from sparsetriton import SparseTensor
 from sparsetriton.utils.hash import HashTable
 from typing import *
+
 from .funcs import ConvHashOnTheFlyImplicitGEMM
 from .funcs.implicit_precomputed_gemm import ConvPrecomputedNeighborGEMM
-from .funcs.im2col_gemm import im2col_gemm_conv
 from .kmap import build_out_coords
 from sparsetriton.config import get_h_table_f, get_conv_algo, ConvAlgo
 
@@ -166,9 +166,8 @@ def sparse_conv3d(
             batch_size=tensor.batch_size,
         )
     
-    # Select algorithm based on config
     algo = get_conv_algo()
-    
+
     if algo == ConvAlgo.PrecomputedNeighborGEMM:
         # Pre-compute neighbor indices with caching
         cache_key = (k_size, s, p, d, submanifold, transposed)
@@ -196,8 +195,7 @@ def sparse_conv3d(
             weight,
             neighbor_indices,
         )
-    else:
-        # Default: ImplicitHashFlyGEMM
+    elif algo == ConvAlgo.ImplicitHashFlyGEMM:
         if transposed:
             if s > 1:
                 spatial_shape = list(map(lambda x: x * s, tensor.spatial_shape))

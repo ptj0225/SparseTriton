@@ -1,5 +1,3 @@
-"""Tests for sparsetriton.config module."""
-
 import pytest
 import torch
 from sparsetriton.config import (
@@ -15,177 +13,101 @@ from sparsetriton.config import (
     _STATE,
 )
 
+_DEFAULT_STATE = dict(_STATE)
+
+
+@pytest.fixture(autouse=True)
+def _restore_config():
+    yield
+    _STATE.update(_DEFAULT_STATE)
+
 
 class TestConvAlgo:
-    """Test ConvAlgo enum."""
-
-    def test_enum_values(self):
-        """Test that enum has correct values."""
-        assert ConvAlgo.ImplicitHashMapGEMM.value == "Implicit_hashmap_gemm"
+    def test_all_enum_values(self):
         assert ConvAlgo.ImplicitHashFlyGEMM.value == "Implicit_hashfly_gemm"
+        assert ConvAlgo.PrecomputedNeighborGEMM.value == "Precomputed_neighbor_gemm"
 
-    def test_enum_members(self):
-        """Test enum membership."""
-        assert ConvAlgo.ImplicitHashMapGEMM in ConvAlgo
-        assert ConvAlgo.ImplicitHashFlyGEMM in ConvAlgo
+    def test_enum_membership(self):
+        assert len(ConvAlgo) == 2
 
 
 class TestCoordsDtype:
-    """Test coordinate dtype configuration."""
-
-    def test_default_coords_dtype(self):
-        """Test default coordinate dtype."""
+    def test_default(self):
         assert get_coords_dtype() == torch.int16
 
-    def test_set_coords_dtype(self):
-        """Test setting coordinate dtype."""
-        original = get_coords_dtype()
-
+    def test_set_and_restore(self):
         set_coords_dtype(torch.int32)
         assert get_coords_dtype() == torch.int32
 
         set_coords_dtype(torch.int8)
         assert get_coords_dtype() == torch.int8
 
-        # Restore original
-        set_coords_dtype(original)
-
-    def test_set_coords_dtype_invalid(self):
-        """Test setting invalid coordinate dtype."""
+    @pytest.mark.parametrize("invalid", ["int32", 32, None])
+    def test_invalid_type(self, invalid):
         with pytest.raises(TypeError):
-            set_coords_dtype("int32")
-
-        with pytest.raises(TypeError):
-            set_coords_dtype(32)
+            set_coords_dtype(invalid)
 
 
 class TestConvAlgoConfig:
-    """Test convolution algorithm configuration."""
+    def test_default(self):
+        assert get_conv_algo() == ConvAlgo.PrecomputedNeighborGEMM
 
-    def test_default_conv_algo(self):
-        """Test default convolution algorithm."""
-        assert get_conv_algo() == ConvAlgo.ImplicitHashFlyGEMM
+    @pytest.mark.parametrize("algo", list(ConvAlgo))
+    def test_set_each_algo(self, algo):
+        set_conv_algo(algo)
+        assert get_conv_algo() == algo
 
-    def test_set_conv_algo(self):
-        """Test setting convolution algorithm."""
-        original = get_conv_algo()
-
-        set_conv_algo(ConvAlgo.ImplicitHashMapGEMM)
-        assert get_conv_algo() == ConvAlgo.ImplicitHashMapGEMM
-
-        set_conv_algo(ConvAlgo.ImplicitHashFlyGEMM)
-        assert get_conv_algo() == ConvAlgo.ImplicitHashFlyGEMM
-
-        # Restore original
-        set_conv_algo(original)
-
-    def test_set_conv_algo_invalid(self):
-        """Test setting invalid convolution algorithm."""
+    @pytest.mark.parametrize("invalid", ["Implicit_hashmap_gemm", 1, None])
+    def test_invalid_type(self, invalid):
         with pytest.raises(TypeError):
-            set_conv_algo("Implicit_hashmap_gemm")
-
-        with pytest.raises(TypeError):
-            set_conv_algo(1)
+            set_conv_algo(invalid)
 
 
 class TestHashTableFactor:
-    """Test hash table factor configuration."""
-
-    def test_default_h_table_f(self):
-        """Test default hash table factor."""
+    def test_default(self):
         assert get_h_table_f() == 1.5
 
-    def test_set_h_table_f(self):
-        """Test setting hash table factor."""
-        original = get_h_table_f()
-
+    def test_set_float(self):
         set_h_table_f(2.0)
         assert get_h_table_f() == 2.0
 
-        set_h_table_f(3.5)
-        assert get_h_table_f() == 3.5
-
-        # Restore original
-        set_h_table_f(original)
-
-    def test_set_h_table_f_integer(self):
-        """Test setting hash table factor with integer."""
-        original = get_h_table_f()
-
+    def test_set_int(self):
         set_h_table_f(2)
         assert get_h_table_f() == 2.0
 
-        # Restore original
-        set_h_table_f(original)
+    def test_set_string(self):
+        set_h_table_f("3.5")
+        assert get_h_table_f() == 3.5
 
-    def test_set_h_table_f_invalid(self):
-        """Test setting invalid hash table factor."""
+    @pytest.mark.parametrize("invalid", [0.5, 0, -1])
+    def test_invalid_range(self, invalid):
         with pytest.raises(AssertionError, match="factor must be >= 1"):
-            set_h_table_f(0.5)
+            set_h_table_f(invalid)
 
-        with pytest.raises(AssertionError, match="factor must be >= 1"):
-            set_h_table_f(0)
-
-        with pytest.raises(AssertionError, match="factor must be >= 1"):
-            set_h_table_f(-1)
-
+    @pytest.mark.parametrize("invalid", ["not_a_number", None])
+    def test_invalid_type(self, invalid):
         with pytest.raises(TypeError, match="factor must be a number"):
-            set_h_table_f("not_a_number")
-
-        with pytest.raises(TypeError, match="factor must be a number"):
-            set_h_table_f(None)
+            set_h_table_f(invalid)
 
 
 class TestHashTableMaxProbe:
-    """Test hash table max probe configuration."""
-
-    def test_default_h_table_max_p(self):
-        """Test default max probe count."""
+    def test_default(self):
         assert get_h_table_max_p() == 16
 
-    def test_set_h_table_max_p(self):
-        """Test setting max probe count."""
-        original = get_h_table_max_p()
-
+    def test_set_int(self):
         set_h_table_max_p(32)
         assert get_h_table_max_p() == 32
 
-        set_h_table_max_p(64)
+    def test_set_string(self):
+        set_h_table_max_p("64")
         assert get_h_table_max_p() == 64
 
-        # Restore original
-        set_h_table_max_p(original)
-
-    def test_set_h_table_max_p_invalid(self):
-        """Test setting invalid max probe count."""
+    @pytest.mark.parametrize("invalid", [0, -1])
+    def test_invalid_range(self, invalid):
         with pytest.raises(AssertionError, match="probe_n must be positive"):
-            set_h_table_max_p(0)
+            set_h_table_max_p(invalid)
 
-        with pytest.raises(AssertionError, match="probe_n must be positive"):
-            set_h_table_max_p(-1)
-
+    @pytest.mark.parametrize("invalid", ["not_a_number", None])
+    def test_invalid_type(self, invalid):
         with pytest.raises(TypeError, match="probe_n must be an integer"):
-            set_h_table_max_p("not_a_number")
-
-        with pytest.raises(TypeError, match="probe_n must be an integer"):
-            set_h_table_max_p(None)
-
-    def test_set_h_table_max_p_string(self):
-        """Test that string numbers are accepted."""
-        original = get_h_table_max_p()
-
-        set_h_table_max_p("32")
-        assert get_h_table_max_p() == 32
-
-        # Restore original
-        set_h_table_max_p(original)
-
-    def test_set_h_table_f_string(self):
-        """Test that string numbers are accepted."""
-        original = get_h_table_f()
-
-        set_h_table_f("2.0")
-        assert get_h_table_f() == 2.0
-
-        # Restore original
-        set_h_table_f(original)
+            set_h_table_max_p(invalid)
